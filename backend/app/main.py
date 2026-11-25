@@ -1,33 +1,151 @@
 """EvalAI demo API: health, student records, and assessment lookups."""
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from collections import defaultdict, deque
+import hashlib
+import hmac
+import json
+import os
 from pathlib import Path
+import re
+import time
+from threading import Lock
+from uuid import uuid4
+from io import BytesIO
+from zipfile import BadZipFile, ZipFile
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import distinct, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from .database import Base, engine, get_db
-from .models import Assessment, Student
-from .schemas import AssessmentList, StudentDetail, StudentList
-from .seed import seed_demo_data
+from .database import Base, SessionLocal, engine, get_db, restrict_database_file_permissions
+from .document_processing import (
+    DocumentProcessingError, VisionProviderError, configured_vision_provider, process_document,
+)
+from .evaluation import (
+    EvaluationProviderError, configured_evaluation_provider, prepare_answers,
+    redact_student_identifiers, result_total, source_fingerprint, validate_provider_results,
+)
+from .feedback import configured_email_provider, generate_feedback, render_feedback_pdf
+from .security import COOKIE_NAME, SESSION_SECONDS, auth_settings, create_session, credentials_match, read_session
+from .models import (
+    Assessment, AssessmentEvaluation, AssessmentQuestion, AssessmentWorkspace, EmailDelivery, StudentFeedback,
+    ExtractedPage, Student, UploadedDocument,
+)
+from .schemas import (
+    AssessmentList, CorrectionInput, DocumentDetail, DocumentList, DocumentUploadResult,
+    DocumentOut, EvaluationEditInput, EvaluationOut, ExtractedPageOut, StudentDetail,
+    EvaluationRejectInput, FacultyLoginInput, FeedbackEditInput, FeedbackOut, EmailDeliveryOut, StudentList, WorkspaceCreate, WorkspaceOut,
+)
+from .seed import seed_assessment_workspaces, seed_demo_data
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    auth_settings()
     Base.metadata.create_all(bind=engine)
-    db = next(get_db())
-    try:
+    restrict_database_file_permissions()
+    with SessionLocal() as db:
         seed_demo_data(db)
-    finally:
-        db.close()
+        seed_assessment_workspaces(db)
     yield
 
 
-app = FastAPI(title="EvalAI API", description="Local demo API with fictional ABC College data.", lifespan=lifespan)
+app = FastAPI(title="EvalAI API", description="Faculty API with fictional ABC College demo data.", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
+
+LOGIN_FAILURES: dict[str, deque[float]] = defaultdict(deque)
+EMAIL_DELIVERY_LOCK = Lock()
+
+
+def secure_cookie_enabled() -> bool:
+    return os.getenv("EVALAI_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes"}
+
+
+@app.middleware("http")
+async def faculty_access_control(request: Request, call_next):
+    path = request.url.path
+    is_api = path.startswith("/api/")
+    public_api = path in {"/api/health", "/api/auth/login", "/api/auth/session"}
+    session = read_session(request.cookies.get(COOKIE_NAME)) if is_api and not public_api else None
+    declared_length = request.headers.get("content-length", "")
+    if path == "/api/documents" and request.method == "POST" and declared_length.isdigit() and int(declared_length) > MAX_UPLOAD_BYTES + 1_000_000:
+        response = JSONResponse({"detail": "Upload request exceeds the 15 MB file limit."}, status_code=413)
+    elif is_api and not public_api and session is None:
+        response = JSONResponse({"detail": "Faculty sign-in is required."}, status_code=401)
+    elif is_api and not public_api and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        supplied = request.headers.get("x-csrf-token", "")
+        if not hmac.compare_digest(supplied, session["csrf"]):
+            response = JSONResponse({"detail": "Request verification failed. Reload the faculty page and retry."}, status_code=403)
+        else:
+            response = await call_next(request)
+    else:
+        response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    if is_api:
+        response.headers["Cache-Control"] = "no-store"
+    if os.getenv("EVALAI_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes"}:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
+@app.get("/api/auth/session")
+def get_auth_session(request: Request):
+    try:
+        username, _, _ = auth_settings()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    session = read_session(request.cookies.get(COOKIE_NAME))
+    return {"authenticated": session is not None, "username": username if session else None,
+            "csrf_token": session["csrf"] if session else None}
+
+
+@app.post("/api/auth/login")
+def faculty_login(payload: FacultyLoginInput, request: Request):
+    try:
+        auth_settings()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    client_ip = request.client.host if request.client else "unknown"
+    failures = LOGIN_FAILURES[client_ip]
+    cutoff = time.monotonic() - 60
+    while failures and failures[0] < cutoff:
+        failures.popleft()
+    if len(failures) >= 10:
+        raise HTTPException(status_code=429, detail="Too many sign-in attempts. Wait one minute and try again.")
+    if not credentials_match(payload.username, payload.password):
+        failures.append(time.monotonic())
+        raise HTTPException(status_code=401, detail="The faculty username or password is incorrect.")
+    failures.clear()
+    token, csrf_token = create_session(payload.username)
+    secure_cookie = secure_cookie_enabled()
+    response = JSONResponse({"authenticated": True, "username": payload.username, "csrf_token": csrf_token})
+    response.set_cookie(COOKIE_NAME, token, max_age=SESSION_SECONDS, httponly=True, secure=secure_cookie,
+                        samesite="strict", path="/")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/auth/logout")
+def faculty_logout():
+    response = JSONResponse({"authenticated": False})
+    response.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=secure_cookie_enabled(), samesite="strict")
+    return response
 
 PROTOTYPE_FILE = Path(__file__).resolve().parents[2] / "evalai-prototypefinal"
 INTEGRATION_SCRIPT = Path(__file__).resolve().parents[2] / "frontend-integration.js"
+DOCUMENT_SCRIPT = Path(__file__).resolve().parents[2] / "document-workflow.js"
+EVALUATION_SCRIPT = Path(__file__).resolve().parents[2] / "evaluation-workflow.js"
+AUTH_SCRIPT = Path(__file__).resolve().parents[2] / "faculty-auth.js"
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".tif", ".tiff", ".doc", ".docx", ".xlsx"}
+IMAGE_MIME = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp", "GIF": "image/gif", "TIFF": "image/tiff"}
 
 
 @app.get("/", include_in_schema=False)
@@ -43,6 +161,140 @@ def serve_frontend_integration():
     if not INTEGRATION_SCRIPT.is_file():
         raise HTTPException(status_code=404, detail="Frontend integration script was not found")
     return FileResponse(INTEGRATION_SCRIPT, media_type="text/javascript")
+
+
+@app.get("/document-workflow.js", include_in_schema=False)
+def serve_document_workflow():
+    if not DOCUMENT_SCRIPT.is_file():
+        raise HTTPException(status_code=404, detail="Document workflow script was not found")
+    return FileResponse(DOCUMENT_SCRIPT, media_type="text/javascript")
+
+
+@app.get("/evaluation-workflow.js", include_in_schema=False)
+def serve_evaluation_workflow():
+    if not EVALUATION_SCRIPT.is_file():
+        raise HTTPException(status_code=404, detail="Evaluation workflow script was not found")
+    return FileResponse(EVALUATION_SCRIPT, media_type="text/javascript")
+
+
+FEEDBACK_SCRIPT = Path(__file__).resolve().parents[2] / "feedback-workflow.js"
+
+
+@app.get("/feedback-workflow.js", include_in_schema=False)
+def serve_feedback_workflow():
+    if not FEEDBACK_SCRIPT.is_file():
+        raise HTTPException(status_code=404, detail="Feedback workflow script was not found")
+    return FileResponse(FEEDBACK_SCRIPT, media_type="text/javascript")
+
+
+@app.get("/faculty-auth.js", include_in_schema=False)
+def serve_faculty_auth_script():
+    if not AUTH_SCRIPT.is_file():
+        raise HTTPException(status_code=404, detail="Faculty sign-in script was not found")
+    return FileResponse(AUTH_SCRIPT, media_type="text/javascript")
+
+
+def upload_directory() -> Path:
+    configured = os.getenv("EVALAI_UPLOAD_DIR")
+    path = Path(configured).expanduser() if configured else Path(__file__).resolve().parents[1] / "uploads"
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    resolved = path.resolve()
+    if os.name != "nt":
+        resolved.chmod(0o700)
+    return resolved
+
+
+def safe_filename(value: str) -> str:
+    filename = Path((value or "upload").replace("\\", "/")).name
+    filename = re.sub(r"[^A-Za-z0-9._ -]", "_", filename).strip(" .")
+    if not filename or len(filename) > 255:
+        raise HTTPException(status_code=400, detail="Filename is empty or too long")
+    return filename
+
+
+def detect_upload_type(filename: str, content: bytes) -> tuple[str, str]:
+    extension = Path(filename).suffix.lower()
+    if extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="Allowed files: PDF, PNG, JPG, WEBP, GIF, TIFF, DOC, DOCX, and XLSX")
+    if extension == ".pdf":
+        if b"%PDF-" not in content[:1024]:
+            raise HTTPException(status_code=415, detail="The file extension says PDF, but its contents are not a PDF")
+        return "application/pdf", extension
+    if extension == ".doc":
+        if not content.startswith(bytes.fromhex("D0CF11E0A1B11AE1")):
+            raise HTTPException(status_code=415, detail="The file contents do not match the DOC file extension")
+        return "application/msword", extension
+    if extension in {".docx", ".xlsx"}:
+        try:
+            with ZipFile(BytesIO(content)) as archive:
+                names = set(archive.namelist())
+        except BadZipFile as exc:
+            raise HTTPException(status_code=415, detail="The Office document is invalid") from exc
+        marker = "word/document.xml" if extension == ".docx" else "xl/workbook.xml"
+        if marker not in names:
+            raise HTTPException(status_code=415, detail="The file contents do not match the Office file extension")
+        return ("application/vnd.openxmlformats-officedocument.wordprocessingml.document" if extension == ".docx"
+                else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), extension
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image_format = image.format
+            if image.width * image.height > 30_000_000:
+                raise HTTPException(status_code=413, detail="Image dimensions exceed the 30 megapixel safety limit")
+            image.verify()
+    except HTTPException:
+        raise
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        raise HTTPException(status_code=415, detail="The uploaded image is invalid or unsupported") from exc
+    media_type = IMAGE_MIME.get(image_format or "")
+    extension_types = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".tif": "image/tiff", ".tiff": "image/tiff"}
+    expected = extension_types.get(extension, "image/" + extension.lstrip("."))
+    if not media_type or media_type != expected:
+        raise HTTPException(status_code=415, detail="The file contents do not match the image extension")
+    return media_type, extension
+
+
+def workspace_out(workspace: AssessmentWorkspace) -> dict:
+    questions = sorted(workspace.questions, key=lambda question: question.position)
+    return {
+        "assessment_code": workspace.assessment_code, "title": workspace.title,
+        "class_code": workspace.class_code, "section": workspace.section,
+        "subject_code": workspace.subject_code, "test_code": workspace.test_code,
+        "test_date": workspace.test_date, "rules": workspace.rules,
+        "rubric_criteria": workspace.rubric_criteria,
+        "questions": questions,
+        "total_marks": sum(question.maximum_marks for question in questions),
+    }
+
+
+@app.get("/api/assessment-workspaces", response_model=list[WorkspaceOut])
+def list_workspaces(db: Session = Depends(get_db)):
+    return db.scalars(select(AssessmentWorkspace).options(selectinload(AssessmentWorkspace.questions))
+                      .order_by(AssessmentWorkspace.title)).all()
+
+
+@app.post("/api/assessment-workspaces", response_model=WorkspaceOut)
+def create_workspace(payload: WorkspaceCreate, db: Session = Depends(get_db)):
+    if payload.class_code not in {"BSC1", "BSC2"} or payload.section not in {"A", "B"}:
+        raise HTTPException(status_code=422, detail="Choose a class and section from the ABC College demo roster")
+    if payload.subject_code not in {"BIO101", "CHEM101", "ECO201"} or payload.test_code not in {"UT1", "UT2", "MID", "SEM1"}:
+        raise HTTPException(status_code=422, detail="Choose a supported subject and assessment type")
+    code = payload.assessment_code or "asm-" + uuid4().hex[:16]
+    workspace = db.get(AssessmentWorkspace, code)
+    fields = payload.model_dump(exclude={"assessment_code", "questions", "total_marks"})
+    if workspace is None:
+        workspace = AssessmentWorkspace(assessment_code=code, **fields)
+        db.add(workspace)
+    else:
+        for field_name, value in fields.items():
+            setattr(workspace, field_name, value)
+    if "questions" in payload.model_fields_set:
+        db.query(AssessmentQuestion).filter(AssessmentQuestion.assessment_code == code).delete()
+        for question in payload.questions:
+            db.add(AssessmentQuestion(assessment_code=code, **question.model_dump()))
+    db.commit()
+    workspace = db.scalar(select(AssessmentWorkspace).options(selectinload(AssessmentWorkspace.questions))
+                          .where(AssessmentWorkspace.assessment_code == code))
+    return workspace_out(workspace)
 
 
 @app.get("/api/health")
@@ -129,3 +381,638 @@ def list_assessments(
     count = db.scalar(count_statement) or 0
     records = db.scalars(statement.order_by(Assessment.id).offset(offset).limit(limit)).all()
     return {"count": count, "records": records}
+
+
+def get_document_or_404(db: Session, document_id: int) -> UploadedDocument:
+    document = db.scalar(
+        select(UploadedDocument).options(
+            selectinload(UploadedDocument.pages), selectinload(UploadedDocument.student)
+        ).where(UploadedDocument.id == document_id)
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Uploaded document not found")
+    return document
+
+
+@app.post("/api/documents", response_model=DocumentUploadResult, status_code=201)
+async def upload_document(
+    assessment_code: str = Form(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_-]+$"),
+    document_type: str = Form(pattern=r"^(question_paper|model_answer|rubric|answer_sheet)$"),
+    student_roll_number: str | None = Form(default=None, max_length=20),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    workspace = db.get(AssessmentWorkspace, assessment_code)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="Assessment workspace not found. Save the assessment setup first.")
+    student = None
+    if document_type == "answer_sheet":
+        if not student_roll_number:
+            raise HTTPException(status_code=422, detail="An answer sheet must be matched to a student roll number")
+        student = db.scalar(select(Student).where(Student.roll_number == student_roll_number))
+        if student is None or student.class_code != workspace.class_code or student.section != workspace.section:
+            raise HTTPException(status_code=422, detail="The selected student does not belong to this assessment class and section")
+    elif student_roll_number:
+        raise HTTPException(status_code=422, detail="Only answer sheets can be associated with an individual student")
+
+    filename = safe_filename(file.filename or "upload")
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Files must be 15 MB or smaller")
+    media_type, extension = detect_upload_type(filename, content)
+    if document_type == "answer_sheet" and extension in {".docx", ".xlsx"}:
+        raise HTTPException(status_code=415, detail="Student answer sheets must be PDF or image files")
+
+    digest = hashlib.sha256(content).hexdigest()
+    duplicate = db.scalar(select(UploadedDocument).where(
+        UploadedDocument.assessment_code == assessment_code,
+        UploadedDocument.student_id == (student.id if student else None),
+        UploadedDocument.document_type == document_type,
+        UploadedDocument.sha256 == digest,
+    ))
+    if duplicate:
+        return {"document": get_document_or_404(db, duplicate.id), "duplicate": True}
+
+    stored_filename = uuid4().hex + extension
+    destination = upload_directory() / stored_filename
+    try:
+        with destination.open("xb") as stored_file:
+            stored_file.write(content)
+        if os.name != "nt":
+            destination.chmod(0o600)
+        document = UploadedDocument(
+            assessment_code=assessment_code, student_id=student.id if student else None,
+            document_type=document_type, original_filename=filename, stored_filename=stored_filename,
+            media_type=media_type, file_size=len(content), sha256=digest,
+        )
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+    except Exception:
+        db.rollback()
+        destination.unlink(missing_ok=True)
+        raise
+    return {"document": get_document_or_404(db, document.id), "duplicate": False}
+
+
+@app.get("/api/documents", response_model=DocumentList)
+def list_documents(
+    assessment_code: str | None = Query(default=None, max_length=40),
+    student_roll_number: str | None = Query(default=None, max_length=20),
+    db: Session = Depends(get_db),
+):
+    statement = select(UploadedDocument).options(selectinload(UploadedDocument.student))
+    if assessment_code:
+        statement = statement.where(UploadedDocument.assessment_code == assessment_code)
+    if student_roll_number:
+        student = db.scalar(select(Student).where(Student.roll_number == student_roll_number))
+        if student is None:
+            return {"count": 0, "records": []}
+        statement = statement.where(UploadedDocument.student_id == student.id)
+    rows = db.scalars(statement.order_by(UploadedDocument.created_at.desc())).all()
+    return {"count": len(rows), "records": rows}
+
+
+@app.get("/api/documents/{document_id}", response_model=DocumentDetail)
+def get_document(document_id: int, db: Session = Depends(get_db)):
+    return get_document_or_404(db, document_id)
+
+
+@app.get("/api/documents/{document_id}/file")
+def get_document_file(document_id: int, db: Session = Depends(get_db)):
+    document = db.get(UploadedDocument, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Uploaded document not found")
+    stored_path = (upload_directory() / document.stored_filename).resolve()
+    if stored_path.parent != upload_directory() or not stored_path.is_file():
+        raise HTTPException(status_code=404, detail="Stored document file is unavailable")
+    return FileResponse(stored_path, media_type=document.media_type, filename=document.original_filename)
+
+
+@app.post("/api/documents/{document_id}/process", response_model=DocumentDetail)
+def process_uploaded_document(document_id: int, retry: bool = Query(default=False), db: Session = Depends(get_db)):
+    document = db.scalar(select(UploadedDocument).options(selectinload(UploadedDocument.pages)).where(UploadedDocument.id == document_id))
+    if document is None:
+        raise HTTPException(status_code=404, detail="Uploaded document not found")
+    if document.status in {"extracted", "partial", "awaiting_provider", "stored_only", "failed"} and not retry:
+        provider_mode = os.getenv("EVALAI_OCR_PROVIDER", "demo").strip().lower()
+        can_use_vision = provider_mode == "openai" and bool(os.getenv("OPENAI_API_KEY"))
+        same_mode = (document.processing_mode == "openai_vision") == can_use_vision
+        if same_mode:
+            return get_document_or_404(db, document.id)
+    stored_path = (upload_directory() / document.stored_filename).resolve()
+    if stored_path.parent != upload_directory() or not stored_path.is_file():
+        document.status = "failed"
+        document.status_message = "Stored file is missing; re-upload this document."
+        db.commit()
+        return get_document_or_404(db, document.id)
+
+    extension = Path(document.original_filename).suffix.lower()
+    if extension in {".doc", ".docx", ".xlsx"}:
+        document.status = "stored_only"
+        document.processing_mode = "office_file_not_processed"
+        document.status_message = "File stored. Office document text extraction is not included; export it as PDF to process it."
+        db.commit()
+        return get_document_or_404(db, document.id)
+
+    document.status = "processing"
+    document.status_message = "Processing pages; answer text is never graded automatically."
+    db.commit()
+    try:
+        vision_provider, provider_mode, provider_message = configured_vision_provider()
+        processed = process_document(stored_path, document.media_type, document.document_type, vision_provider)
+        db.query(ExtractedPage).filter(ExtractedPage.document_id == document.id).delete()
+        for page in processed["pages"]:
+            db.add(ExtractedPage(document_id=document.id, **page))
+        document.status = processed["status"]
+        document.processing_mode = (
+            "openai_vision" if any(page["source"] == "openai_vision" for page in processed["pages"])
+            else "pdf_text" if any(page["source"] == "pdf_text" for page in processed["pages"])
+            else provider_mode
+        )
+        document.status_message = processed["message"]
+        if document.status == "awaiting_provider" and provider_mode.startswith("demo"):
+            document.status_message = provider_message + " No answer text was generated."
+        db.commit()
+    except DocumentProcessingError as exc:
+        db.rollback()
+        document = db.get(UploadedDocument, document_id)
+        document.status = "failed"
+        document.status_message = str(exc)
+        db.commit()
+    except VisionProviderError as exc:
+        db.rollback()
+        document = db.get(UploadedDocument, document_id)
+        document.status = "failed"
+        document.processing_mode = "openai_vision"
+        document.status_message = str(exc)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        document = db.get(UploadedDocument, document_id)
+        document.status = "failed"
+        document.status_message = "Document processing failed unexpectedly. Check the backend log and retry."
+        db.commit()
+        raise HTTPException(status_code=500, detail=document.status_message) from exc
+    return get_document_or_404(db, document_id)
+
+
+@app.put("/api/documents/{document_id}/pages/{page_number}", response_model=ExtractedPageOut)
+def correct_extracted_page(document_id: int, page_number: int, payload: CorrectionInput, db: Session = Depends(get_db)):
+    page = db.scalar(select(ExtractedPage).where(
+        ExtractedPage.document_id == document_id, ExtractedPage.page_number == page_number
+    ))
+    if page is None:
+        raise HTTPException(status_code=404, detail="Extracted page not found")
+    page.corrected_text = payload.corrected_text
+    page.faculty_verified = True
+    page.needs_review = False
+    db.commit()
+    db.refresh(page)
+    return page
+
+
+def get_evaluation_or_404(db: Session, evaluation_id: int) -> AssessmentEvaluation:
+    evaluation = db.scalar(select(AssessmentEvaluation).options(
+        selectinload(AssessmentEvaluation.student),
+    ).where(AssessmentEvaluation.id == evaluation_id))
+    if evaluation is None:
+        raise HTTPException(status_code=404, detail="Evaluation record not found")
+    return evaluation
+
+
+def evaluation_out(evaluation: AssessmentEvaluation) -> dict:
+    marks = [question["maximum_marks"] for question in evaluation.question_snapshot]
+    return {
+        "id": evaluation.id, "assessment_code": evaluation.assessment_code,
+        "student_roll_number": evaluation.student.roll_number,
+        "student_name": evaluation.student.name, "document_id": evaluation.document_id,
+        "status": evaluation.status, "provider_mode": evaluation.provider_mode,
+        "model_name": evaluation.model_name, "status_message": evaluation.status_message,
+        "question_snapshot": evaluation.question_snapshot, "answer_sources": evaluation.answer_sources,
+        "ai_proposed": evaluation.ai_proposed, "faculty_edited": evaluation.faculty_edited,
+        "final_approved": evaluation.final_approved,
+        "ai_proposed_total": result_total(evaluation.ai_proposed),
+        "faculty_edited_total": result_total(evaluation.faculty_edited) if evaluation.faculty_edited is not None else None,
+        "final_approved_total": result_total(evaluation.final_approved) if evaluation.final_approved is not None else None,
+        "total_marks": sum(marks), "rejection_reason": evaluation.rejection_reason,
+        "created_at": evaluation.created_at, "updated_at": evaluation.updated_at,
+        "decided_at": evaluation.decided_at,
+    }
+
+
+@app.post("/api/assessments/{assessment_code}/students/{roll_number}/evaluations", response_model=EvaluationOut)
+def evaluate_student_answers(assessment_code: str, roll_number: str, db: Session = Depends(get_db)):
+    workspace = db.scalar(select(AssessmentWorkspace).options(
+        selectinload(AssessmentWorkspace.questions),
+    ).where(AssessmentWorkspace.assessment_code == assessment_code))
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="Assessment workspace not found")
+    questions = sorted(workspace.questions, key=lambda question: question.position)
+    if not questions:
+        raise HTTPException(status_code=422, detail="Add question text, a model answer, maximum marks, and a question-specific rubric before evaluation")
+
+    student = db.scalar(select(Student).where(Student.roll_number == roll_number))
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student record not found")
+    if student.class_code != workspace.class_code or student.section != workspace.section:
+        raise HTTPException(status_code=422, detail="This student does not belong to the assessment class and section")
+
+    document = db.scalar(select(UploadedDocument).options(
+        selectinload(UploadedDocument.pages),
+    ).where(
+        UploadedDocument.assessment_code == assessment_code,
+        UploadedDocument.student_id == student.id,
+        UploadedDocument.document_type == "answer_sheet",
+    ).order_by(UploadedDocument.created_at.desc()))
+    if document is None:
+        raise HTTPException(status_code=404, detail="Upload a student answer sheet before evaluation")
+
+    question_snapshot = [{
+        "question_id": question.question_id, "position": question.position,
+        "prompt": question.prompt, "model_answer": question.model_answer,
+        "maximum_marks": question.maximum_marks, "rubric_criteria": question.rubric_criteria,
+    } for question in questions]
+    answer_map, answer_sources, missing_ids = prepare_answers(document, question_snapshot)
+    fingerprint = source_fingerprint(assessment_code, document.id, question_snapshot, answer_map)
+    existing = db.scalar(select(AssessmentEvaluation).options(
+        selectinload(AssessmentEvaluation.student),
+    ).where(
+        AssessmentEvaluation.assessment_code == assessment_code,
+        AssessmentEvaluation.student_id == student.id,
+        AssessmentEvaluation.source_fingerprint == fingerprint,
+        AssessmentEvaluation.status != "rejected",
+    ).order_by(AssessmentEvaluation.created_at.desc()))
+    if existing is not None:
+        return evaluation_out(existing)
+
+    if len(missing_ids) == len(questions):
+        missing_results = [
+            {
+                "question_id": question["question_id"], "maximum_marks": question["maximum_marks"],
+                "proposed_marks": None,
+                "reasoning": "Not evaluated because no readable answer text is available for this question.",
+                "strengths": [], "improvement_areas": [],
+                "uncertainty_flags": ["missing_or_unreadable_answer", "manual_review_required"],
+                "requires_faculty_review": True,
+            }
+            for question in question_snapshot
+        ]
+        evaluation = AssessmentEvaluation(
+            assessment_code=assessment_code, student_id=student.id, document_id=document.id,
+            status="needs_manual_review", provider_mode="not_evaluated", model_name=None,
+            source_fingerprint=fingerprint, question_snapshot=question_snapshot,
+            answer_sources=answer_sources, ai_proposed=missing_results,
+            status_message="No model call was made. Every question has missing or unreadable answer text; add a faculty correction before evaluation.",
+        )
+        db.add(evaluation)
+        db.commit()
+        return evaluation_out(get_evaluation_or_404(db, evaluation.id))
+
+    question_inputs = []
+    requested_questions = []
+    for question in question_snapshot:
+        answer_text = answer_map.get(question["question_id"], "")
+        if not answer_text:
+            continue
+        requested_questions.append(question)
+        question_inputs.append({
+            **question, "student_answer": redact_student_identifiers(answer_text, student),
+        })
+
+    try:
+        provider = configured_evaluation_provider()
+        provider_response = provider.evaluator.evaluate(
+            question_inputs, workspace.rubric_criteria or [], workspace.rules or "",
+        )
+        returned = validate_provider_results(provider_response, requested_questions)
+    except EvaluationProviderError as exc:
+        raise HTTPException(status_code=503 if "not configured" in str(exc).lower() else 502, detail=str(exc)) from exc
+
+    proposed = []
+    for question in question_snapshot:
+        result = returned.get(question["question_id"])
+        if result is None:
+            result = {
+                "question_id": question["question_id"], "maximum_marks": question["maximum_marks"],
+                "proposed_marks": None,
+                "reasoning": "Not evaluated because no readable answer text is available for this question.",
+                "strengths": [], "improvement_areas": [],
+                "uncertainty_flags": ["missing_or_unreadable_answer", "manual_review_required"],
+                "requires_faculty_review": True,
+            }
+        proposed.append(result)
+
+    status_message = (
+        "Simulated demo suggestions. These fixed placeholder marks do not assess answer quality; replace with OpenAI to evaluate content."
+        if provider.mode == "demo_simulation" else
+        "OpenAI rubric evaluation is provisional. Faculty review and approval are required before marks are official."
+    )
+    if missing_ids:
+        status_message += " One or more questions have no readable answer and remain unscored until corrected."
+    evaluation = AssessmentEvaluation(
+        assessment_code=assessment_code, student_id=student.id, document_id=document.id,
+        status="provisional", provider_mode=provider.mode, model_name=provider.model_name,
+        source_fingerprint=fingerprint, question_snapshot=question_snapshot,
+        answer_sources=answer_sources, ai_proposed=proposed, status_message=status_message,
+    )
+    db.add(evaluation)
+    db.commit()
+    return evaluation_out(get_evaluation_or_404(db, evaluation.id))
+
+
+@app.get("/api/evaluations", response_model=list[EvaluationOut])
+def list_evaluations(
+    assessment_code: str | None = Query(default=None, max_length=40),
+    student_roll_number: str | None = Query(default=None, max_length=20),
+    db: Session = Depends(get_db),
+):
+    statement = select(AssessmentEvaluation).options(selectinload(AssessmentEvaluation.student))
+    if assessment_code:
+        statement = statement.where(AssessmentEvaluation.assessment_code == assessment_code)
+    if student_roll_number:
+        student = db.scalar(select(Student).where(Student.roll_number == student_roll_number))
+        if student is None:
+            return []
+        statement = statement.where(AssessmentEvaluation.student_id == student.id)
+    evaluations = db.scalars(statement.order_by(AssessmentEvaluation.created_at.desc())).all()
+    return [evaluation_out(evaluation) for evaluation in evaluations]
+
+
+@app.get("/api/evaluations/{evaluation_id}", response_model=EvaluationOut)
+def get_evaluation(evaluation_id: int, db: Session = Depends(get_db)):
+    return evaluation_out(get_evaluation_or_404(db, evaluation_id))
+
+
+@app.put("/api/evaluations/{evaluation_id}/edits", response_model=EvaluationOut)
+def edit_evaluation(evaluation_id: int, payload: EvaluationEditInput, db: Session = Depends(get_db)):
+    evaluation = get_evaluation_or_404(db, evaluation_id)
+    if evaluation.status not in {"provisional", "edited"}:
+        raise HTTPException(status_code=409, detail="Only a provisional evaluation can be edited")
+    originals = {item["question_id"]: item for item in evaluation.ai_proposed}
+    maxima = {item["question_id"]: item["maximum_marks"] for item in evaluation.question_snapshot}
+    edited = {}
+    for result in payload.question_results:
+        if result.question_id not in originals or result.question_id in edited:
+            raise HTTPException(status_code=422, detail="The edit must contain each assessment question exactly once")
+        if result.maximum_marks != maxima[result.question_id]:
+            raise HTTPException(status_code=422, detail="Question maximum marks cannot be changed during review")
+        if originals[result.question_id]["proposed_marks"] is None and result.proposed_marks is not None:
+            raise HTTPException(status_code=422, detail="Correct the missing answer text and create a new evaluation before entering marks")
+        edited[result.question_id] = result.model_dump()
+    if set(edited) != set(originals):
+        raise HTTPException(status_code=422, detail="The edit must contain each assessment question exactly once")
+    evaluation.faculty_edited = [edited[item["question_id"]] for item in evaluation.ai_proposed]
+    evaluation.status = "edited"
+    evaluation.status_message = "Faculty edits are saved separately; the original AI proposal is preserved. Approval is still required."
+    db.commit()
+    return evaluation_out(get_evaluation_or_404(db, evaluation.id))
+
+
+@app.post("/api/evaluations/{evaluation_id}/approve", response_model=EvaluationOut)
+def approve_evaluation(evaluation_id: int, db: Session = Depends(get_db)):
+    evaluation = get_evaluation_or_404(db, evaluation_id)
+    if evaluation.status == "approved":
+        return evaluation_out(evaluation)
+    if evaluation.status not in {"provisional", "edited"}:
+        raise HTTPException(status_code=409, detail="This evaluation is not ready for approval")
+    approved_results = evaluation.faculty_edited if evaluation.faculty_edited is not None else evaluation.ai_proposed
+    if not approved_results or any(result["proposed_marks"] is None for result in approved_results):
+        raise HTTPException(status_code=422, detail="Cannot approve while one or more answers are missing or unreadable. Correct the extraction and evaluate again.")
+
+    workspace = db.get(AssessmentWorkspace, evaluation.assessment_code)
+    maximum = sum(question["maximum_marks"] for question in evaluation.question_snapshot)
+    score = result_total(approved_results)
+    student = db.get(Student, evaluation.student_id)
+    existing_mark = db.scalar(select(Assessment).where(
+        Assessment.student_id == student.id,
+        Assessment.assessment_code == evaluation.assessment_code,
+    ))
+    subject_names = {
+        "BIO101": "Introduction to Biology", "CHEM101": "Chemistry Fundamentals", "ECO201": "Ecology",
+    }
+    official_mark = existing_mark or Assessment(
+        student_id=student.id, assessment_code=workspace.assessment_code,
+        title=workspace.title, subject_code=workspace.subject_code,
+        subject_name=subject_names.get(workspace.subject_code, workspace.subject_code),
+        test_code=workspace.test_code, term="Fall 2026", date=workspace.test_date or "Date not set",
+        score=score, max_score=maximum,
+    )
+    official_mark.score = score
+    official_mark.max_score = maximum
+    official_mark.review_status = (
+        "Faculty approved OpenAI evaluation" if evaluation.provider_mode == "openai"
+        else "Faculty approved demo evaluation"
+    )
+    if existing_mark is None:
+        db.add(official_mark)
+    evaluation.final_approved = approved_results
+    evaluation.status = "approved"
+    evaluation.decided_at = datetime.now(timezone.utc)
+    evaluation.status_message = "Faculty approved these marks. The approved score is now the official assessment record."
+    db.commit()
+    return evaluation_out(get_evaluation_or_404(db, evaluation.id))
+
+
+@app.post("/api/evaluations/{evaluation_id}/reject", response_model=EvaluationOut)
+def reject_evaluation(evaluation_id: int, payload: EvaluationRejectInput, db: Session = Depends(get_db)):
+    evaluation = get_evaluation_or_404(db, evaluation_id)
+    if evaluation.status == "approved":
+        raise HTTPException(status_code=409, detail="An approved evaluation cannot be rejected; create a corrected evaluation instead")
+    if evaluation.status == "rejected":
+        return evaluation_out(evaluation)
+    evaluation.status = "rejected"
+    evaluation.rejection_reason = payload.reason
+    evaluation.decided_at = datetime.now(timezone.utc)
+    evaluation.status_message = "Faculty rejected this evaluation. It is not an official mark."
+    db.commit()
+    return evaluation_out(get_evaluation_or_404(db, evaluation.id))
+
+
+def feedback_out(db: Session, feedback: StudentFeedback) -> dict:
+    deliveries = db.scalars(select(EmailDelivery).where(EmailDelivery.feedback_id == feedback.id)
+                             .order_by(EmailDelivery.id.desc())).all()
+    latest = deliveries[0] if deliveries else None
+    return {
+        "id": feedback.id, "evaluation_id": feedback.evaluation_id,
+        "assessment_code": feedback.assessment_code,
+        "student_roll_number": feedback.student.roll_number, "student_name": feedback.student.name,
+        "student_email": feedback.student.email, "status": feedback.status, "content": feedback.content,
+        "delivery_status": latest.status if latest else "pending",
+        "delivery_mode": latest.provider_mode if latest else None,
+        "delivery_message": latest.message if latest else "Feedback has not been delivered.",
+        "delivery_attempts": len(deliveries), "approved_at": feedback.approved_at,
+        "created_at": feedback.created_at, "updated_at": feedback.updated_at,
+    }
+
+
+def get_feedback_or_404(db: Session, feedback_id: int) -> StudentFeedback:
+    feedback = db.scalar(select(StudentFeedback).options(selectinload(StudentFeedback.student))
+                         .where(StudentFeedback.id == feedback_id))
+    if feedback is None:
+        raise HTTPException(status_code=404, detail="Feedback record was not found")
+    return feedback
+
+
+@app.post("/api/evaluations/{evaluation_id}/feedback", response_model=FeedbackOut)
+def create_feedback(evaluation_id: int, db: Session = Depends(get_db)):
+    evaluation = db.get(AssessmentEvaluation, evaluation_id)
+    if evaluation is None:
+        raise HTTPException(status_code=404, detail="Evaluation record was not found")
+    if evaluation.status != "approved" or not evaluation.final_approved:
+        raise HTTPException(status_code=409, detail="Feedback can only be generated from faculty-approved evaluation results")
+    feedback = db.scalar(select(StudentFeedback).where(StudentFeedback.evaluation_id == evaluation_id))
+    if feedback is None:
+        try:
+            content = generate_feedback(evaluation)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        feedback = StudentFeedback(evaluation_id=evaluation.id, student_id=evaluation.student_id,
+                                   assessment_code=evaluation.assessment_code, content=content, status="draft")
+        db.add(feedback)
+        db.commit()
+        feedback = db.scalar(select(StudentFeedback).options(selectinload(StudentFeedback.student))
+                             .where(StudentFeedback.id == feedback.id))
+    return feedback_out(db, feedback)
+
+
+@app.get("/api/feedback", response_model=list[FeedbackOut])
+def list_feedback(student_roll_number: str | None = Query(default=None, max_length=20),
+                  assessment_code: str | None = Query(default=None, max_length=40),
+                  db: Session = Depends(get_db)):
+    statement = select(StudentFeedback).options(selectinload(StudentFeedback.student))
+    if student_roll_number:
+        student = db.scalar(select(Student).where(Student.roll_number == student_roll_number))
+        if student is None:
+            return []
+        statement = statement.where(StudentFeedback.student_id == student.id)
+    if assessment_code:
+        statement = statement.where(StudentFeedback.assessment_code == assessment_code)
+    records = db.scalars(statement.order_by(StudentFeedback.created_at.desc())).all()
+    return [feedback_out(db, feedback) for feedback in records]
+
+
+@app.get("/api/feedback/{feedback_id}", response_model=FeedbackOut)
+def get_feedback(feedback_id: int, db: Session = Depends(get_db)):
+    return feedback_out(db, get_feedback_or_404(db, feedback_id))
+
+
+@app.put("/api/feedback/{feedback_id}", response_model=FeedbackOut)
+def edit_feedback(feedback_id: int, payload: FeedbackEditInput, db: Session = Depends(get_db)):
+    feedback = get_feedback_or_404(db, feedback_id)
+    if feedback.status != "draft":
+        raise HTTPException(status_code=409, detail="Only draft feedback can be edited")
+    original = feedback.content
+    edited = payload.content
+    if len(json.dumps(edited, ensure_ascii=False)) > 60000:
+        raise HTTPException(status_code=413, detail="Feedback draft is too large")
+    expected_content_keys = {"assessment_code", "score", "maximum_marks", "percentage", "overall_summary",
+                             "overall_strengths", "improvement_areas", "questions", "source", "demo_result"}
+    if set(edited) != expected_content_keys:
+        raise HTTPException(status_code=422, detail="Feedback draft has an invalid structure")
+    if (edited.get("assessment_code") != feedback.assessment_code or
+            edited.get("score") != original["score"] or edited.get("maximum_marks") != original["maximum_marks"] or
+            edited.get("percentage") != original["percentage"] or edited.get("source") != original["source"] or
+            edited.get("demo_result") != original["demo_result"]):
+        raise HTTPException(status_code=422, detail="Feedback edits cannot change approved marks or their source")
+    questions = edited.get("questions")
+    expected_question_keys = {"question_id", "prompt", "marks", "maximum_marks", "strengths", "missing_concepts", "suggestions"}
+    if (not isinstance(questions, list) or any(not isinstance(question, dict) or set(question) != expected_question_keys for question in questions)
+            or [q.get("question_id") for q in questions] != [q["question_id"] for q in original["questions"]]):
+        raise HTTPException(status_code=422, detail="Feedback must retain every approved question in its original order")
+    for candidate, baseline in zip(questions, original["questions"]):
+        if candidate.get("marks") != baseline["marks"] or candidate.get("maximum_marks") != baseline["maximum_marks"]:
+            raise HTTPException(status_code=422, detail="Question marks cannot be changed in feedback")
+        for key in ("prompt", "strengths", "missing_concepts", "suggestions"):
+            value = candidate.get(key)
+            if key == "prompt":
+                if value != baseline[key]:
+                    raise HTTPException(status_code=422, detail="Question text cannot be changed in feedback")
+            elif not isinstance(value, list) or len(value) > 20 or any(not isinstance(item, str) or len(item) > 500 for item in value):
+                raise HTTPException(status_code=422, detail="Question feedback must contain short text items")
+    for key in ("overall_summary",):
+        if not isinstance(edited.get(key), str) or not edited[key].strip() or len(edited[key]) > 2000:
+            raise HTTPException(status_code=422, detail="Overall summary must be non-empty and under 2,000 characters")
+    for key in ("overall_strengths", "improvement_areas"):
+        value = edited.get(key)
+        if not isinstance(value, list) or len(value) > 40 or any(not isinstance(item, str) or len(item) > 500 for item in value):
+            raise HTTPException(status_code=422, detail="Feedback lists must contain short text items")
+    feedback.content = edited
+    db.commit()
+    return feedback_out(db, get_feedback_or_404(db, feedback.id))
+
+
+@app.post("/api/feedback/{feedback_id}/approve", response_model=FeedbackOut)
+def approve_feedback(feedback_id: int, db: Session = Depends(get_db)):
+    feedback = get_feedback_or_404(db, feedback_id)
+    if feedback.status == "approved":
+        return feedback_out(db, feedback)
+    if feedback.status != "draft":
+        raise HTTPException(status_code=409, detail="Feedback is not a draft")
+    evaluation = db.get(AssessmentEvaluation, feedback.evaluation_id)
+    if evaluation is None or evaluation.status != "approved" or not evaluation.final_approved:
+        raise HTTPException(status_code=409, detail="The source evaluation is no longer faculty-approved")
+    feedback.status = "approved"
+    feedback.approved_at = datetime.now(timezone.utc)
+    db.commit()
+    return feedback_out(db, get_feedback_or_404(db, feedback.id))
+
+
+@app.get("/api/feedback/{feedback_id}/pdf")
+def download_feedback_pdf(feedback_id: int, db: Session = Depends(get_db)):
+    feedback = get_feedback_or_404(db, feedback_id)
+    if feedback.status != "approved":
+        raise HTTPException(status_code=409, detail="Approve feedback before downloading its report")
+    data = render_feedback_pdf(feedback.student.name, feedback.student.roll_number, feedback.content)
+    filename = f"EvalAI_Feedback_{feedback.student.roll_number}_{feedback.assessment_code}.pdf"
+    return StreamingResponse(BytesIO(data), media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/feedback/{feedback_id}/deliveries", response_model=list[EmailDeliveryOut])
+def feedback_deliveries(feedback_id: int, db: Session = Depends(get_db)):
+    feedback = get_feedback_or_404(db, feedback_id)
+    records = db.scalars(select(EmailDelivery).where(EmailDelivery.feedback_id == feedback.id)
+                         .order_by(EmailDelivery.id)).all()
+    return records
+
+
+@app.post("/api/feedback/{feedback_id}/deliver", response_model=FeedbackOut)
+def deliver_feedback(feedback_id: int, db: Session = Depends(get_db)):
+    # The selected deployment is single-process. Serialize the check-and-send window
+    # so two faculty clicks cannot race past the successful-send check.
+    with EMAIL_DELIVERY_LOCK:
+        return _deliver_feedback_serialized(feedback_id, db)
+
+
+def _deliver_feedback_serialized(feedback_id: int, db: Session):
+    feedback = get_feedback_or_404(db, feedback_id)
+    if feedback.status != "approved":
+        raise HTTPException(status_code=409, detail="Approve feedback before delivery")
+    previous = db.scalars(select(EmailDelivery).where(EmailDelivery.feedback_id == feedback.id)
+                          .order_by(EmailDelivery.id.desc())).all()
+    if any(item.status == "sent" for item in previous):
+        raise HTTPException(status_code=409, detail="This approved feedback was already sent successfully; duplicate delivery is blocked")
+    try:
+        provider = configured_email_provider()
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    attempt = EmailDelivery(feedback_id=feedback.id, status="pending", provider_mode=provider.mode,
+                           recipient=feedback.student.email, message="Delivery attempt started.")
+    db.add(attempt)
+    db.commit()
+    try:
+        pdf = render_feedback_pdf(feedback.student.name, feedback.student.roll_number, feedback.content)
+        message = provider.send(feedback.student.email,
+                                f"ABC College feedback: {feedback.assessment_code}",
+                                feedback.content["overall_summary"], pdf)
+        attempt.status = "simulated" if provider.mode == "simulation" else "sent"
+        attempt.message = message
+    except Exception:
+        attempt.status = "failed"
+        attempt.message = "Delivery failed. Check the configured email provider, then retry."
+    attempt.completed_at = datetime.now(timezone.utc)
+    db.commit()
+    return feedback_out(db, get_feedback_or_404(db, feedback.id))

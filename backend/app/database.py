@@ -28,3 +28,14 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def restrict_database_file_permissions() -> None:
+    """Limit the SQLite file to its service account on POSIX hosts."""
+    if os.name == "nt" or engine.url.get_backend_name() != "sqlite":
+        return
+    filename = engine.url.database
+    if filename and filename != ":memory:":
+        path = Path(filename)
+        if path.is_file():
+            path.chmod(0o600)

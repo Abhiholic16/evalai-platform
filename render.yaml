@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: evalai-portfolio-demo
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    disk:
+      name: evalai-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: EVALAI_DATABASE_URL
+        value: sqlite:////var/data/evalai.sqlite3
+      - key: EVALAI_UPLOAD_DIR
+        value: /var/data/uploads
+      - key: EVALAI_DATA_DIR
+        value: /var/data
+      - key: EVALAI_COOKIE_SECURE
+        value: "true"
+      - key: EVALAI_OCR_PROVIDER
+        value: demo
+      - key: EVALAI_EVALUATION_PROVIDER
+        value: demo
+      - key: EVALAI_EMAIL_PROVIDER
+        value: simulation
+      - key: EVALAI_FACULTY_USERNAME
+        sync: false
+      - key: EVALAI_FACULTY_PASSWORD
+        sync: false
+      - key: EVALAI_SESSION_SECRET
+        generateValue: true

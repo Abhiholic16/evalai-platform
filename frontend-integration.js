@@ -3,6 +3,7 @@
   var allStudents = null;
   var studentRequestId = 0;
   var assessmentRequestId = 0;
+  var localDocumentAssessments = [];
   var searchTimer = null;
   var localRenderStudentPerformance = window.renderStudentPerformance;
 
@@ -78,16 +79,25 @@
   function resetResultsFromApi(rows) {
     rows.forEach(function (row) {
       var key = row.assessment_code + "|" + row.student_roll_number;
+      var approvedByFaculty = typeof row.review_status === "string" && row.review_status.indexOf("Faculty approved") === 0;
+      var rubricSource = row.review_status === "Faculty approved OpenAI evaluation" ?
+        "faculty-approved OpenAI rubric evaluation" :
+        (row.review_status === "Faculty approved demo evaluation" ? "faculty-approved demo rubric evaluation" : "SQLite demo record");
       if (!results[key]) {
         results[key] = {
-          score: row.score, max: row.max_score, status: "Needs review", flag: false,
-          source: "SQLite demo record"
+          score: row.score, max: row.max_score, status: approvedByFaculty ? "Approved" : "Needs review", flag: false,
+          source: rubricSource, reviewStatus: row.review_status
         };
       } else {
         // Keep this page session's faculty review edits while refreshing source marks.
-        if (results[key].source === "SQLite demo record" && results[key].status !== "Approved") {
+        if (approvedByFaculty || (results[key].source === "SQLite demo record" && results[key].status !== "Approved")) {
           results[key].score = row.score;
           results[key].max = row.max_score;
+          if (approvedByFaculty) {
+            results[key].status = "Approved";
+            results[key].source = rubricSource;
+            results[key].reviewStatus = row.review_status;
+          }
         }
       }
     });
@@ -100,7 +110,8 @@
     try {
       var query = queryString(assessmentParams("dash"));
       var responses = await Promise.all([
-        getAllStudents(), apiGet("/api/assessments" + (query ? "?" + query : ""))
+        getAllStudents(), apiGet("/api/assessments" + (query ? "?" + query : "")),
+        apiGet("/api/assessment-workspaces"), apiGet("/api/documents")
       ]);
       if (requestId !== assessmentRequestId) return;
       students = responses[0].slice();
@@ -129,6 +140,34 @@
         }) ? "Feedback ready" : "Review in progress";
         return assessment;
       });
+      localDocumentAssessments = responses[2].filter(function (workspace) {
+        return !grouped[workspace.assessment_code];
+      }).map(function (workspace) {
+        var documents = responses[3].records.filter(function (document) {
+          return document.assessment_code === workspace.assessment_code;
+        });
+        var rolls = documents.filter(function (document) { return document.document_type === "answer_sheet"; })
+          .map(function (document) { return document.student_roll_number; }).filter(Boolean);
+        return {
+          id: workspace.assessment_code, title: workspace.title, cls: workspace.class_code,
+          section: workspace.section, subject: workspace.subject_code, test: workspace.test_code,
+          term: "Fall 2026", date: workspace.test_date || "Date not set", submitted: rolls.length,
+          total: roster.filter(function (s) { return s.cls === workspace.class_code && s.section === workspace.section; }).length,
+          status: documents.length ? "Documents uploaded" : "Setup saved", rolls: rolls,
+          _documentWorkflow: true, documents: documents
+        };
+      });
+      var dashboardFilters = {
+        cls: document.getElementById("dashClass").value, section: document.getElementById("dashSection").value,
+        subject: document.getElementById("dashSubject").value, test: document.getElementById("dashTest").value
+      };
+      var localRows = localDocumentAssessments.filter(function (item) {
+        return (dashboardFilters.cls === "all" || dashboardFilters.cls === item.cls) &&
+          (dashboardFilters.section === "all" || dashboardFilters.section === item.section) &&
+          (dashboardFilters.subject === "all" || dashboardFilters.subject === item.subject) &&
+          (dashboardFilters.test === "all" || dashboardFilters.test === item.test);
+      });
+      assessments = assessments.concat(localRows);
       var list = assessments;
       table.innerHTML = list.length ? list.map(function (assessment) {
         return '<tr><td><span class="primarytext">' + assessment.title + '</span><div class="secondary">' + (tests[assessment.test] || assessment.test) + ' · ' + assessment.date + '</div></td><td>' + (classes[assessment.cls] || assessment.cls) + ' · Section ' + assessment.section + '</td><td>' + (subjects[assessment.subject] || assessment.subject) + '</td><td>' + assessment.submitted + ' of ' + assessment.total + ' students</td><td><span class="pill ' + (assessment.status === "Feedback ready" ? "green" : "amber") + '">' + assessment.status + '</span></td><td><button class="btn primary small" data-open="' + assessment.id + '">Open test review →</button></td></tr>';
@@ -224,12 +263,20 @@
         term: row.term, date: row.date, rolls: [student.roll]
       };
       var key = assessment.id + "|" + student.roll;
-      if (!results[key]) results[key] = { score: row.score, max: row.max_score, status: "Needs review", flag: false, source: "SQLite demo record" };
+      if (!results[key]) results[key] = { score: row.score, max: row.max_score, status: row.review_status && row.review_status.indexOf("Faculty approved") === 0 ? "Approved" : "Needs review", flag: false, source: row.review_status === "Faculty approved OpenAI evaluation" ? "faculty-approved OpenAI rubric evaluation" : (row.review_status === "Faculty approved demo evaluation" ? "faculty-approved demo rubric evaluation" : "SQLite demo record"), reviewStatus: row.review_status };
       if (results[key].source === "SQLite demo record" && results[key].status !== "Approved") {
         results[key].score = row.score;
         results[key].max = row.max_score;
       }
       var review = ensureFeedbackData(assessment, student, results[key]);
+      if (review.source === "faculty-approved OpenAI rubric evaluation" || review.source === "faculty-approved demo rubric evaluation") {
+        review.aiFeedback = "Question-level scoring rationale is shown in the rubric evaluation review. Personalized learner coaching has not been generated.";
+        review.strengths = [];
+        review.improvements = [];
+        review.questionFeedback = [];
+        review.approvedFeedback = "Faculty approved the rubric score. Personalized learner coaching has not been generated.";
+        review.emailStatus = "Not sent";
+      }
       return { a: assessment, r: review, key: key };
     }).sort(function (left, right) { return new Date(left.a.date) - new Date(right.a.date); });
   };

@@ -224,7 +224,9 @@ __marimo__/
 
 # EvalAI local data and editor files
 .env.*
+!.env.example
 uploads/
+backend/.integration-test/
 *.db
 *.sqlite3
 .DS_Store
