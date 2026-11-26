@@ -121,6 +121,12 @@ def test_root_serves_existing_prototype():
     assert '<script src="/faculty-auth.js"></script>' in response.text
 
 
+def test_frontend_deep_links_serve_app_shell():
+    response = client.get("/assessment/demo")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+
+
 def test_search_by_name_or_roll_and_class_section_filters():
     assert client.get("/api/students", params={"search": "ananya"}).json()["count"] == 1
     assert client.get("/api/students", params={"search": "2413"}).json()["records"][0]["name"] == "Rohan Das"

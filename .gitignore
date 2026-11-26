@@ -151,6 +151,8 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -207,6 +209,13 @@ cython_debug/
 # .vscode/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
+
+# EvalAI local runtime state
+backend/evalai.sqlite3*
+backend/uploads/
+backend/backups/
+backend/server-*.err
+backend/server-*.log
 
 # Ruff stuff:
 .ruff_cache/

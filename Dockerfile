@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/app /app/backend/app
-COPY evalai-prototypefinal frontend-integration.js document-workflow.js evaluation-workflow.js feedback-workflow.js faculty-auth.js /app/
+COPY frontend /app/frontend
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 RUN useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin evalai \

@@ -149,11 +149,12 @@ def faculty_logout():
     response.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=secure_cookie_enabled(), samesite="strict")
     return response
 
-PROTOTYPE_FILE = Path(__file__).resolve().parents[2] / "evalai-prototypefinal"
-INTEGRATION_SCRIPT = Path(__file__).resolve().parents[2] / "frontend-integration.js"
-DOCUMENT_SCRIPT = Path(__file__).resolve().parents[2] / "document-workflow.js"
-EVALUATION_SCRIPT = Path(__file__).resolve().parents[2] / "evaluation-workflow.js"
-AUTH_SCRIPT = Path(__file__).resolve().parents[2] / "faculty-auth.js"
+FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+PROTOTYPE_FILE = FRONTEND_DIR / "index.html"
+INTEGRATION_SCRIPT = FRONTEND_DIR / "frontend-integration.js"
+DOCUMENT_SCRIPT = FRONTEND_DIR / "document-workflow.js"
+EVALUATION_SCRIPT = FRONTEND_DIR / "evaluation-workflow.js"
+AUTH_SCRIPT = FRONTEND_DIR / "faculty-auth.js"
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".tif", ".tiff", ".doc", ".docx", ".xlsx"}
 IMAGE_MIME = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp", "GIF": "image/gif", "TIFF": "image/tiff"}
@@ -188,7 +189,7 @@ def serve_evaluation_workflow():
     return FileResponse(EVALUATION_SCRIPT, media_type="text/javascript")
 
 
-FEEDBACK_SCRIPT = Path(__file__).resolve().parents[2] / "feedback-workflow.js"
+FEEDBACK_SCRIPT = FRONTEND_DIR / "feedback-workflow.js"
 
 
 @app.get("/feedback-workflow.js", include_in_schema=False)

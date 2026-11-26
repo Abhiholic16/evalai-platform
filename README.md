@@ -2,6 +2,8 @@
 
 ## Project overview
 
+The current architecture is direct multimodal grading: matched uploads are queued automatically, original answer-sheet pages are sent to the configured evaluation provider, and question-wise marks plus concise reasons are returned for faculty review and approval. OCR/transcription is not a grading prerequisite. The frontend is organized under `frontend/` and the API under `backend/`. See [docs/architecture.md](docs/architecture.md) for boundaries and limitations.
+
 EvalAI is a local faculty assessment prototype for assessment setup, answer extraction, rubric review, approved marks, and feedback. It uses fictional student records stored in SQLite; no college database is connected. Faculty retain control over every official mark and feedback message.
 
 The current mock dataset contains four fictional Year 2 Information Technology students in Section A, with two Mathematics assessment workspaces and synthetic answer sheets. Engineering supports Year 1 through Year 4, each with Sections A and B. Students do not log in.
@@ -10,7 +12,7 @@ The current mock dataset contains four fictional Year 2 Information Technology s
 
 - Existing faculty dashboard and student search/filter workflows backed by FastAPI and SQLite.
 - Question and rubric setup; PDF/image upload; file type and size checks; duplicate detection; private file storage.
-- Digital PDF text extraction; optional Gemini vision transcription with uncertainty indicators and faculty corrections.
+- Direct multimodal evaluation of original answer-sheet pages; extraction remains an optional diagnostic path, not a grading prerequisite.
 - Optional schema-constrained Gemini rubric recommendations; approval is required before marks become official.
 - Feedback drafts built per student and assessment from approved results, editable and approvable by faculty.
 - Individual PDF reports and delivery history. Email simulation is the default; SMTP is used only when explicitly configured.
@@ -90,7 +92,7 @@ Set private values in `backend\.env`:
 - Keep `EVALAI_COOKIE_SECURE=false` for local HTTP. Set it to `true` behind HTTPS.
 - Keep `EVALAI_EMAIL_PROVIDER=simulation` as configured.
 
-Start the backend (it serves the existing frontend too):
+Start the unified local application (the API serves the organized frontend too):
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --env-file .env
