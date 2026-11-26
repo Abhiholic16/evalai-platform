@@ -28,6 +28,7 @@ class FacultyLoginInput(BaseModel):
 
 
 class StudentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     roll_number: str
     name: str
@@ -37,6 +38,8 @@ class StudentOut(BaseModel):
     program: str
     academic_year: str
     year: str
+    branch: str
+    semester: str
     admission_year: str
 
 
@@ -45,13 +48,13 @@ class StudentDetail(StudentOut):
 
 
 class StudentList(BaseModel):
-    source: str = "fictional ABC College SQLite demo data"
+    source: str = "local prototype roster"
     count: int
     records: list[StudentOut]
 
 
 class AssessmentList(BaseModel):
-    source: str = "fictional ABC College SQLite demo data"
+    source: str = "local prototype assessment records"
     count: int
     records: list[AssessmentOut]
 
@@ -64,13 +67,23 @@ class WorkspaceCreate(BaseModel):
     subject_code: str = Field(min_length=1, max_length=20)
     test_code: str = Field(min_length=1, max_length=20)
     test_date: str = Field(default="", max_length=30)
+    question_source: str = Field(default="question_paper", pattern=r"^(question_paper|manual)$")
     rules: str = Field(default="", max_length=2000)
+    marking_mode: str = Field(default="holistic_percentage", pattern=r"^(holistic_percentage|stepwise)$")
+    correctness_threshold: float = Field(default=0.5, ge=0, le=1)
+    score_bands: list[dict[str, str | int | float]] = Field(default_factory=lambda: [
+        {"label": "Full credit", "minimum_correctness_percent": 50, "award_percent": 100},
+        {"label": "Partial credit", "minimum_correctness_percent": 1, "award_percent": 50},
+        {"label": "No credit", "minimum_correctness_percent": 0, "award_percent": 0},
+    ], max_length=10)
     rubric_criteria: list[dict[str, str | int]] = Field(default_factory=list, max_length=30)
     questions: list["AssessmentQuestionInput"] = Field(default_factory=list, max_length=30)
     total_marks: int | None = Field(default=None, ge=0, le=1000)
 
     @model_validator(mode="after")
     def total_matches_question_marks(self):
+        if self.question_source == "manual" and not self.questions:
+            raise ValueError("Manual question entry requires at least one valid question")
         if self.questions:
             question_ids = [question.question_id.lower() for question in self.questions]
             positions = [question.position for question in self.questions]
@@ -91,17 +104,22 @@ class AssessmentQuestionInput(BaseModel):
     question_id: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9_-]+$")
     position: int = Field(ge=1, le=30)
     prompt: str = Field(min_length=3, max_length=2000)
-    model_answer: str = Field(min_length=1, max_length=8000)
-    maximum_marks: int = Field(gt=0, le=500)
-    rubric_criteria: list[str] = Field(min_length=1, max_length=20)
+    model_answer: str = Field(default="", max_length=8000)
+    maximum_marks: int = Field(default=10, gt=0, le=500)
+    rubric_criteria: list[str] = Field(default_factory=list, max_length=20)
 
-    @field_validator("question_id", "prompt", "model_answer")
+    @field_validator("question_id", "prompt")
     @classmethod
     def trim_required_text(cls, value: str) -> str:
         value = value.strip()
         if not value:
             raise ValueError("This field cannot be blank")
         return value
+
+    @field_validator("model_answer")
+    @classmethod
+    def trim_optional_answer(cls, value: str) -> str:
+        return value.strip()
 
     @field_validator("rubric_criteria")
     @classmethod
@@ -121,7 +139,11 @@ class WorkspaceOut(BaseModel):
     subject_code: str
     test_code: str
     test_date: str
+    question_source: str = "question_paper"
     rules: str
+    marking_mode: str = "holistic_percentage"
+    correctness_threshold: float = 0.5
+    score_bands: list[dict] = Field(default_factory=list)
     rubric_criteria: list[dict]
     questions: list["AssessmentQuestionOut"] = Field(default_factory=list)
     total_marks: int = 0
@@ -150,7 +172,25 @@ class ExtractedPageOut(BaseModel):
     faculty_verified: bool
 
 
+class ProcessingJobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    state: str
+    stage: str
+    attempts: int
+    page_count: int | None
+    pages_done: int
+    detail: str
+    detected_roll: str | None
+    match_method: str | None
+    match_detail: str | None
+
+
+class DocumentMatchInput(BaseModel):
+    student_roll_number: str = Field(min_length=1, max_length=20)
+
+
 class DocumentOut(BaseModel):
+    job: ProcessingJobOut | None = None
     model_config = ConfigDict(from_attributes=True)
     id: int
     assessment_code: str

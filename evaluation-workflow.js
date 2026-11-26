@@ -35,8 +35,19 @@
         maximum_marks: Number(card.querySelector(".question-maximum").value) || 0,
         rubric_criteria: criteriaFromCard(card)
       };
-    });
+    }).filter(function (question) { return question.prompt.length > 0; });
   }
+
+  window.setEvaluationQuestions = function (questions) {
+    var host = document.getElementById("assessmentQuestionConfig");
+    if (!host) return;
+    host.replaceChildren();
+    (questions || []).forEach(function (question, index) {
+      addQuestionCard(question.question_id || "Q" + (index + 1), question);
+    });
+    if (!questions || !questions.length) addQuestionCard("Q1", { maximum_marks: 10 });
+    updateAssessmentTotal();
+  };
 
   function getEvaluationTotalMarks() {
     return getEvaluationQuestions().reduce(function (total, question) { return total + question.maximum_marks; }, 0);
@@ -93,11 +104,9 @@
 
   function validateQuestionEditor(event) {
     var questions = getEvaluationQuestions();
-    var error = null;
-    if (!questions.length) error = "Add at least one assessment question.";
-    else if (questions.some(function (question) {
-      return question.prompt.length < 3 || !question.model_answer || question.maximum_marks < 1 || !question.rubric_criteria.length;
-    })) error = "Complete each question, model answer, maximum mark, and question-specific marking criterion before saving.";
+    var error = questions.some(function (question) {
+      return question.prompt.length < 3 || question.maximum_marks < 1;
+    }) ? "Complete the question text and maximum marks for each manually added question." : null;
     if (error) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -114,15 +123,15 @@
   }
 
   function evaluationActionText(evaluation) {
-    if (!evaluation) return "Generate rubric evaluation";
+    if (!evaluation) return "Evaluate answer sheet";
     if (evaluation.status === "approved") return "View faculty-approved marks";
-    if (evaluation.status === "rejected") return "Generate a new evaluation";
-    if (evaluation.status === "needs_manual_review") return "Retry after correcting answers";
+    if (evaluation.status === "rejected") return "Evaluate answer sheet again";
+    if (evaluation.status === "needs_manual_review") return "Evaluate answer sheet again";
     return "Review provisional recommendation";
   }
 
   window.renderEvaluationActions = async function (assessment, documents) {
-    if (!assessment._evaluationLoaded) {
+    if (!assessment._evaluationLoaded && !assessment.reviewPayload) {
       if (assessment._evaluationLoading) return;
       assessment._evaluationLoading = true;
       try {
@@ -138,6 +147,36 @@
       return;
     }
 
+    if (assessment.reviewPayload) {
+      assessment.evaluations = assessment.reviewPayload.submissions.map(function (item) { return item.evaluation; }).filter(Boolean);
+      assessment._evaluationLoaded = true;
+    }
+    function eligible(evaluation, doc) {
+      return evaluation && ["provisional", "edited"].includes(evaluation.status) &&
+        (!doc.job || doc.job.state === "complete") &&
+        evaluation.ai_proposed.every(function (result) { return !(result.uncertainty_flags || []).length; }) &&
+        (evaluation.faculty_edited || evaluation.ai_proposed).every(function (result) { return result.proposed_marks != null; });
+    }
+    var candidates = documents.map(function (doc) { return { doc: doc, evaluation: latestEvaluationForDocument(assessment, doc.id) }; }).filter(function (item) { return eligible(item.evaluation, item.doc); });
+    var header = document.querySelector("#classReview .cardhead");
+    var bulk = document.getElementById("approveEligibleSubmissions");
+    if (!bulk && header) {
+      bulk = document.createElement("button"); bulk.id = "approveEligibleSubmissions"; bulk.className = "btn primary"; header.appendChild(bulk);
+    }
+    if (bulk) {
+      bulk.textContent = "Approve all eligible (" + candidates.length + ")";
+      bulk.disabled = !candidates.length;
+      bulk.onclick = async function () {
+        bulk.disabled = true;
+        var approved = 0, failed = 0;
+        for (var item of candidates) {
+          try { await request("/api/evaluations/" + item.evaluation.id + "/approve", { method: "POST" }); approved++; }
+          catch (_) { failed++; }
+        }
+        toast(approved + " approved. Entries needing attention were skipped." + (failed ? " " + failed + " could not be approved." : ""));
+        await window.openAssessment(assessment.id, true);
+      };
+    }
     documents.forEach(function (documentRecord) {
       if (documentRecord.document_type !== "answer_sheet" || !documentRecord.student_roll_number) return;
       var row = Array.prototype.find.call(document.querySelectorAll("[data-document-row]"), function (candidate) {
@@ -146,17 +185,33 @@
       if (!row || row.dataset.evaluationActionAdded === "true") return;
       row.dataset.evaluationActionAdded = "true";
       var evaluation = latestEvaluationForDocument(assessment, documentRecord.id);
+      if (!evaluation && documentRecord.job && ["queued", "running"].includes(documentRecord.job.state)) return;
       var actionCell = row.cells[5];
       var status = evaluation ? evaluation.status.replaceAll("_", " ") : "Not evaluated";
-      var total = evaluation ? (evaluation.final_approved_total != null ? evaluation.final_approved_total : evaluation.ai_proposed_total) + " / " + evaluation.total_marks : "";
-      actionCell.insertAdjacentHTML("beforeend", '<div class="recordmeta" style="margin:6px 0">' + esc(status) + (total ? " · " + esc(total) : "") + '</div><button class="btn small" data-evaluation-action>' + esc(evaluationActionText(evaluation)) + '</button>');
+      if (evaluation && evaluation.status === "approved") {
+        var badge = row.cells[4].querySelector(".pill");
+        if (badge) { badge.textContent = "Approved"; badge.className = "pill green"; }
+      }
+      var total = evaluation ? (evaluation.final_approved_total != null ? evaluation.final_approved_total : evaluation.faculty_edited_total != null ? evaluation.faculty_edited_total : evaluation.ai_proposed_total) + " / " + evaluation.total_marks : "";
+      var flags = evaluation ? Array.from(new Set(evaluation.ai_proposed.reduce(function (all, result) { return all.concat(result.uncertainty_flags || []); }, []))) : [];
+      if (!evaluation) {
+        if (documentRecord.job && documentRecord.job.state === "needs_attention") return;
+        actionCell.insertAdjacentHTML("beforeend", '<div class="recordmeta" style="margin:6px 0">Evaluation will start automatically.</div>');
+        return;
+      }
+      actionCell.insertAdjacentHTML("beforeend", '<div class="recordmeta" style="margin:6px 0">' + esc(status) + (total ? " · " + esc(total) : "") + '</div>' + (flags.length ? '<div class="extractwarning">⚑ ' + esc(flags.join("; ")) + '</div>' : '') + '<button class="btn small" data-evaluation-action>' + esc(evaluationActionText(evaluation)) + '</button>');
       actionCell.querySelector("[data-evaluation-action]").addEventListener("click", async function (buttonEvent) {
         var button = buttonEvent.currentTarget;
         button.disabled = true;
         var priorText = button.textContent;
-        button.textContent = evaluation && evaluation.status !== "rejected" ? "Loading..." : "Evaluating against rubric...";
+          button.textContent = evaluation && evaluation.status !== "rejected" ? "Loading..." : "Reading and evaluating sheet...";
         try {
           var mustEvaluate = !evaluation || evaluation.status === "rejected" || evaluation.status === "needs_manual_review";
+          if (mustEvaluate && documentRecord.job) {
+            await request("/api/documents/" + documentRecord.id + "/process?retry=true", { method: "POST" });
+            await window.openAssessment(assessment.id);
+            return;
+          }
           var result = !mustEvaluate ?
             await request("/api/evaluations/" + evaluation.id) :
             await request("/api/assessments/" + encodeURIComponent(assessment.id) + "/students/" + encodeURIComponent(documentRecord.student_roll_number) + "/evaluations", { method: "POST" });
@@ -169,6 +224,18 @@
           button.textContent = priorText;
         }
       });
+      if (eligible(evaluation, documentRecord)) {
+        var approve = document.createElement("button");
+        approve.className = "btn small primary"; approve.textContent = "Approve"; approve.style.marginLeft = "8px";
+        approve.onclick = async function () {
+          approve.disabled = true;
+          try {
+            await request("/api/evaluations/" + evaluation.id + "/approve", { method: "POST" });
+            toast("Marks approved."); await window.openAssessment(assessment.id, true);
+          } catch (error) { approve.disabled = false; toast(error.message); }
+        };
+        actionCell.appendChild(approve);
+      }
     });
   };
 
@@ -197,8 +264,9 @@
     var body = document.getElementById("evaluationBody");
     var isEditable = evaluation.status === "provisional" || evaluation.status === "edited";
     var selected = evaluation.status === "approved" ? evaluation.final_approved : (evaluation.faculty_edited || evaluation.ai_proposed);
-    var modeLabel = evaluation.provider_mode === "openai" ? "OpenAI model-generated rubric recommendation" :
-      evaluation.provider_mode === "demo_simulation" ? "SIMULATED DEMO: fixed placeholder marks; answer quality was not evaluated" : "Manual review required; no model call was made";
+    var modeLabel = evaluation.provider_mode === "gemini" ? "Gemini model-generated rubric recommendation" :
+      evaluation.provider_mode === "openai" ? "Previously stored OpenAI rubric recommendation" :
+      evaluation.provider_mode === "demo_simulation" ? "Simulated marks; answer quality was not evaluated" : "Manual review required; no model call was made";
     var aiTotal = evaluation.ai_proposed_total;
     var currentTotal = evaluation.status === "approved" ? evaluation.final_approved_total :
       (evaluation.faculty_edited_total == null ? null : evaluation.faculty_edited_total);
@@ -210,12 +278,11 @@
     var questionsHtml = evaluation.question_snapshot.map(function (question) {
       var ai = evaluation.ai_proposed.find(function (item) { return item.question_id === question.question_id; });
       var current = selected.find(function (item) { return item.question_id === question.question_id; }) || ai;
-      var sources = evaluation.answer_sources.filter(function (source) { return source.question_id === question.question_id; });
+      var sources = evaluation.answer_sources.filter(function (source) { return source.question_id === question.question_id || source.question_id == null; });
       var sourceHtml = sources.length ? sources.map(function (source) {
-        return '<div class="evaluation-meta">Answer source: document ' + source.document_id + ', page ' + source.page_number + ' · ' + esc(source.source) +
-          (source.used_faculty_correction ? ' · faculty-corrected text used' : ' · raw extracted text used') +
-          ' <button class="btn small" data-eval-source="' + source.document_id + '">Open original</button></div><div class="extractraw">' + esc(source.answer_text) + '</div>';
-      }).join("") : '<div class="extractwarning">No readable answer text was matched to this question. It remains unscored.</div>';
+        return '<div class="evaluation-meta">Answer source: original answer sheet, page ' + source.page_number +
+          ' · <button class="btn small" data-eval-source="' + source.document_id + '">Open original</button></div>';
+      }).join("") : '<div class="extractwarning">No readable answer was identified for this question. Faculty review is required.</div>';
       return '<section class="evaluation-question" data-evaluation-question="' + esc(question.question_id) + '"><h3>' + esc(question.question_id) + ' · ' + esc(question.prompt) + '</h3>' +
         '<div class="evaluation-meta">Question maximum: ' + question.maximum_marks + ' marks · ' + esc(question.rubric_criteria.join("; ")) + '</div>' + sourceHtml +
         '<div class="evaluation-points">AI proposed: ' + (ai.proposed_marks == null ? 'Not scored' : ai.proposed_marks + ' / ' + ai.maximum_marks) + '</div>' +
@@ -337,7 +404,7 @@
       var card = document.createElement("div");
       card.className = "assessment-history";
       card.id = "rubricEvaluationHistory";
-      card.innerHTML = '<div class="cardtitle">Rubric evaluation history</div><div class="carddesc">AI scores remain provisional until faculty approval. Demo placeholder marks are not content-evaluated.</div>' +
+      card.innerHTML = '<div class="cardtitle">Rubric evaluation history</div><div class="carddesc">AI scores remain provisional until faculty approval. Simulated marks are not content-evaluated.</div>' +
         (payload.length ? payload.map(function (evaluation) {
           var total = evaluation.final_approved_total != null ? evaluation.final_approved_total : evaluation.ai_proposed_total;
           var totalLabel = evaluation.status === "approved" ? "Faculty-approved official mark" : "Provisional recommendation";

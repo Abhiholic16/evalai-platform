@@ -1,6 +1,4 @@
-"""PDF text extraction and optional, explicitly enabled OpenAI vision OCR."""
-import base64
-import json
+"""PDF text extraction and optional, explicitly enabled Gemini vision OCR."""
 import os
 import re
 from dataclasses import dataclass
@@ -11,10 +9,12 @@ from typing import Any
 import pymupdf
 from PIL import Image
 
+from .provider_diagnostics import provider_error as diagnose_provider_error, response_json
+
 
 MAX_DOCUMENT_PAGES = 30
 MAX_PAGE_DIMENSION_POINTS = 1800
-VISION_PROMPT = """Transcribe only words that are visibly written on this page. This is transcription, not grading: do not score, evaluate, correct, summarize, or infer an answer. Preserve question numbers where visible. If any writing is unclear, do not guess; leave that span empty and add a short uncertainty note. Return only JSON with this shape: {\"raw_text\": string, \"confidence\": \"high\"|\"medium\"|\"low\", \"uncertain_spans\": [string], \"question_answers\": [{\"question\": string, \"text\": string, \"confidence\": \"high\"|\"medium\"|\"low\", \"uncertain_spans\": [string]}]}. Do not create question answers when question boundaries are not visible."""
+VISION_PROMPT = """Transcribe only words that are visibly written on this page. This is transcription, not grading: do not score, evaluate, correct, summarize, or infer an answer. Preserve question numbers where visible. If any writing is unclear, do not guess; leave that span empty and add a short uncertainty note. Return only JSON with this shape: {\"raw_text\": string, \"confidence\": \"high\"|\"medium\"|\"low\", \"uncertain_spans\": [string], \"question_answers\": [{\"question\": string, \"text\": string, \"confidence\": \"high\"|\"medium\"|\"low\", \"uncertain_spans\": [string]}]}. Include the visible student roll number, with its label, in raw_text when present. Do not create question answers when question boundaries are not visible."""
 
 
 class DocumentProcessingError(Exception):
@@ -33,29 +33,37 @@ class VisionResult:
     uncertain_spans: list[str]
 
 
-class OpenAIVisionProvider:
+class GeminiVisionProvider:
     def __init__(self, api_key: str, model: str):
-        from openai import OpenAI
+        from google import genai
+        from google.genai import types
 
-        self.client = OpenAI(api_key=api_key, timeout=90.0, max_retries=1)
+        self.client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=25_000, retry_options={"attempts": 1}))
+        self.types = types
         self.model = model
 
     def transcribe_page(self, png_bytes: bytes) -> VisionResult:
-        image_data = base64.b64encode(png_bytes).decode("ascii")
         try:
-            response = self.client.responses.create(
+            response = self.client.models.generate_content(
                 model=self.model,
-                store=False,
-                max_output_tokens=1800,
-                input=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": VISION_PROMPT},
-                        {"type": "input_image", "image_url": f"data:image/png;base64,{image_data}", "detail": "high"},
-                    ],
-                }],
+                contents=[self.types.Part.from_text(text=VISION_PROMPT), self.types.Part.from_bytes(data=png_bytes, mime_type="image/png")],
+                config=self.types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema={"type": "object", "properties": {
+                        "raw_text": {"type": "string"}, "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                        "uncertain_spans": {"type": "array", "items": {"type": "string"}},
+                        "question_answers": {"type": "array", "items": {"type": "object", "properties": {
+                            "question": {"type": "string"}, "text": {"type": "string"},
+                            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                            "uncertain_spans": {"type": "array", "items": {"type": "string"}},
+                        }, "required": ["question", "text", "confidence", "uncertain_spans"]}},
+                    }, "required": ["raw_text", "confidence", "uncertain_spans", "question_answers"]},
+                    max_output_tokens=5000,
+                ),
             )
-            data = json.loads(response.output_text)
+            data = response_json(response)
+            if not isinstance(data.get("raw_text"), str) or not data["raw_text"].strip():
+                raise VisionProviderError("Gemini returned no readable transcription.")
             confidence = normalize_confidence(data.get("confidence"))
             answers = data.get("question_answers", [])
             if not isinstance(answers, list):
@@ -76,8 +84,13 @@ class OpenAIVisionProvider:
                 question_answers=safe_answers,
                 uncertain_spans=safe_string_list(data.get("uncertain_spans")),
             )
+        except VisionProviderError:
+            raise
         except Exception as exc:
-            raise VisionProviderError("Vision transcription failed. Check the provider settings and retry.") from exc
+            message, retryable = diagnose_provider_error(exc)
+            error = VisionProviderError("Vision transcription failed. " + message)
+            error.retryable = retryable
+            raise error from None
 
 
 def safe_string_list(value: Any) -> list[str]:
@@ -92,16 +105,16 @@ def normalize_confidence(value: Any) -> str:
 
 
 def configured_vision_provider():
-    """Only contact OpenAI when both explicit provider selection and a key exist."""
+    """Only contact Gemini when explicitly selected and a server-side key exists."""
     provider = os.getenv("EVALAI_OCR_PROVIDER", "demo").strip().lower()
-    api_key = os.getenv("OPENAI_API_KEY")
-    if provider != "openai":
+    api_key = os.getenv("GEMINI_API_KEY")
+    if provider != "gemini":
         return None, "demo", "No vision provider selected; scanned handwriting was not transcribed."
     if not api_key:
-        return None, "demo_no_api_key", "OpenAI was selected but no API key is configured; scanned handwriting was not transcribed."
-    model = os.getenv("EVALAI_VISION_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+        return None, "demo_no_api_key", "Gemini was selected but no API key is configured; scanned handwriting was not transcribed."
+    model = os.getenv("EVALAI_VISION_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
     try:
-        return OpenAIVisionProvider(api_key, model), "openai_vision", f"OpenAI vision transcription via {model}; faculty verification is required."
+        return GeminiVisionProvider(api_key, model), "gemini_vision", f"Gemini vision transcription via {model}; faculty verification is required."
     except Exception as exc:
         raise VisionProviderError("Could not initialize the configured vision provider.") from exc
 
@@ -126,7 +139,11 @@ def render_pdf_page(page) -> bytes:
 
 def split_questions(text: str) -> list[dict[str, str]]:
     """Best-effort segmentation for visible question labels; never fabricate labels."""
-    matches = list(re.finditer(r"(?m)^\s*((?:Q(?:uestion)?\s*)?\d{1,2}[.) :])\s*", text, re.IGNORECASE))
+    # Prefer explicit labels so a number at the start of a wrapped solution
+    # line does not become a new question.
+    matches = list(re.finditer(r"(?im)^[^\S\n]*(Q(?:uestion)?[^\S\n]*\d{1,2})\b[.) :\u00b7]*", text))
+    if not matches:
+        matches = list(re.finditer(r"(?m)^[^\S\n]*(\d{1,2}[.):])[^\S\n]+(?=\S)", text))
     if not matches:
         return []
     sections = []
@@ -138,50 +155,88 @@ def split_questions(text: str) -> list[dict[str, str]]:
     return sections
 
 
-def process_document(file_path: Path, media_type: str, document_type: str, vision_provider=None) -> dict[str, Any]:
+def process_document(file_path: Path, media_type: str, document_type: str, vision_provider=None, progress=None, cached_pages=None) -> dict[str, Any]:
     """Process every PDF page or one image, keeping page references and uncertainty."""
     is_pdf = media_type == "application/pdf" or file_path.suffix.lower() == ".pdf"
     pages = []
     provider_error = None
+    cached_pages = cached_pages or {}
+
+    def store(page, total):
+        pages.append(page)
+        if progress:
+            progress(page, total)
+
+    def transcribe(png):
+        for attempt in range(2):
+            try:
+                return vision_provider.transcribe_page(png)
+            except VisionProviderError as exc:
+                if attempt or not getattr(exc, "retryable", False):
+                    raise
+
     if is_pdf:
         try:
             pdf = pymupdf.open(file_path)
         except Exception as exc:
             raise DocumentProcessingError("This PDF could not be opened or is damaged.") from exc
         with pdf:
+            if pdf.needs_pass:
+                raise DocumentProcessingError("Unlock this password-protected PDF and re-upload it.")
             if pdf.page_count < 1 or pdf.page_count > MAX_DOCUMENT_PAGES:
                 raise DocumentProcessingError(f"PDFs must contain between 1 and {MAX_DOCUMENT_PAGES} pages.")
             for page_index in range(pdf.page_count):
+                if page_index + 1 in cached_pages:
+                    pages.append(cached_pages[page_index + 1])
+                    continue
                 page = pdf.load_page(page_index)
                 if page.rect.width > MAX_PAGE_DIMENSION_POINTS or page.rect.height > MAX_PAGE_DIMENSION_POINTS:
                     raise DocumentProcessingError("A PDF page is larger than the safe processing limit.")
                 embedded_text = page.get_text("text").strip()
-                use_vision = vision_provider is not None and (document_type == "answer_sheet" or len(embedded_text) < 30)
+                sections = split_questions(embedded_text)
+                if document_type in {"question_paper", "model_answer"}:
+                    ordered_text = page.get_text("text", sort=True).strip()
+                    ordered_sections = split_questions(ordered_text)
+                    if len(ordered_sections) > len(sections):
+                        embedded_text, sections = ordered_text, ordered_sections
+                meaningful_text = bool(sections) or len(re.sub(r"[^\w]", "", embedded_text)) >= 30
+                # A bare page number or an empty final page is not a scan.
+                has_graphics = bool(page.get_image_info() or page.get_drawings()) if not meaningful_text else False
+                blank = not meaningful_text and not has_graphics and bool(
+                    not embedded_text or re.fullmatch(r"(?:page\s+)?\d{1,3}(?:\s*/\s*\d{1,3})?", embedded_text, re.I)
+                )
+                if not has_graphics and not blank:
+                    meaningful_text = True
+                use_vision = vision_provider is not None and not meaningful_text and not blank
                 if use_vision:
                     try:
-                        result = vision_provider.transcribe_page(render_pdf_page(page))
-                        pages.append({
+                        result = transcribe(render_pdf_page(page))
+                        store({
                             "page_number": page_index + 1, "raw_text": result.raw_text,
-                            "question_answers": result.question_answers, "source": "openai_vision",
+                            "question_answers": result.question_answers, "source": "gemini_vision",
                             "confidence_label": result.confidence, "confidence_source": "model_self_assessment",
                             "needs_review": True,
-                        })
+                        }, pdf.page_count)
                         continue
-                    except VisionProviderError:
-                        provider_error = "Vision provider failed on one or more pages; inspect the source document manually."
-                if embedded_text:
-                    pages.append({
+                    except VisionProviderError as exc:
+                        provider_error = provider_error or f"Page {page_index + 1}: {exc}"
+                        if not getattr(exc, "retryable", False):
+                            vision_provider = None
+                    except (RuntimeError, ValueError):
+                        provider_error = f"Page {page_index + 1} could not be rasterized. Re-export the PDF and retry."
+                if meaningful_text:
+                    store({
                         "page_number": page_index + 1, "raw_text": embedded_text[:20000],
-                        "question_answers": split_questions(embedded_text), "source": "pdf_text",
+                        "question_answers": sections, "source": "pdf_text",
                         "confidence_label": "not_applicable", "confidence_source": "embedded_pdf_text",
                         "needs_review": document_type == "answer_sheet",
-                    })
+                    }, pdf.page_count)
                 else:
-                    pages.append({
-                        "page_number": page_index + 1, "raw_text": "", "question_answers": [],
-                        "source": "unavailable", "confidence_label": "unknown",
-                        "confidence_source": "none", "needs_review": True,
-                    })
+                    store({
+                        "page_number": page_index + 1, "raw_text": "" if blank else embedded_text[:20000], "question_answers": [],
+                        "source": "blank" if blank else "unavailable", "confidence_label": "unknown",
+                        "confidence_source": "none", "needs_review": not blank,
+                    }, pdf.page_count)
     else:
         png_bytes = image_to_png(file_path.read_bytes())
         if vision_provider is None:
@@ -189,23 +244,25 @@ def process_document(file_path: Path, media_type: str, document_type: str, visio
                           "confidence_label": "unknown", "confidence_source": "none", "needs_review": True})
         else:
             try:
-                result = vision_provider.transcribe_page(png_bytes)
+                result = transcribe(png_bytes)
                 pages.append({"page_number": 1, "raw_text": result.raw_text, "question_answers": result.question_answers,
-                              "source": "openai_vision", "confidence_label": result.confidence,
+                              "source": "gemini_vision", "confidence_label": result.confidence,
                               "confidence_source": "model_self_assessment", "needs_review": True})
-            except VisionProviderError:
-                provider_error = "Vision provider failed; inspect the source image manually."
+            except VisionProviderError as exc:
+                provider_error = f"Page 1: {exc}"
                 pages.append({"page_number": 1, "raw_text": "", "question_answers": [], "source": "unavailable",
                               "confidence_label": "unknown", "confidence_source": "none", "needs_review": True})
 
-    any_extraction = any(page["raw_text"].strip() for page in pages)
+    if not is_pdf and progress:
+        progress(pages[0], 1)
+    any_extraction = any(page["raw_text"].strip() and page["source"] != "unavailable" for page in pages)
     all_available = all(page["source"] != "unavailable" for page in pages)
     if provider_error:
         status = "partial" if any_extraction else "failed"
         message = provider_error
     elif not any_extraction:
         status = "awaiting_provider"
-        message = "No text was extracted. No OCR provider is configured; no answer text was invented. Configure a vision provider or transcribe manually."
+        message = "No readable page text was extracted. Open the original and add a faculty transcription."
     elif all_available:
         status = "extracted"
         message = "Text extraction completed. Review every page before using it; no marks were generated."

@@ -232,3 +232,10 @@ backend/.integration-test/
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Local reversible database reset archives
+backend/backups/
+
+# Local processing worker coordination
+*.worker-lock*
+*.worker-child-lock*

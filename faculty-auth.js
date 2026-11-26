@@ -10,7 +10,7 @@
     panel.hidden = false;
     panel.style.display = "grid";
     var status = panel.querySelector("[data-auth-status]");
-    status.textContent = message || "Sign in with the faculty account configured for this demo.";
+    status.textContent = message || "Sign in with the faculty account configured for this workspace.";
   }
   function showApp() {
     panel.hidden = true;
@@ -53,7 +53,7 @@
     panel.id = "facultyAuthPanel";
     panel.hidden = true;
     panel.style.cssText = "position:fixed;inset:0;z-index:10000;background:#f5f7fa;display:none;place-items:center;padding:20px;font:14px Arial,sans-serif;color:#19263c";
-    panel.innerHTML = '<form style="width:min(100%,390px);background:white;border:1px solid #e5eaf1;border-radius:14px;padding:28px;box-shadow:0 12px 36px #22314b18"><div style="font-size:22px;font-weight:700;margin-bottom:6px">EvalAI faculty sign-in</div><p style="color:#718097;font-size:13px">ABC College portfolio demonstration</p><label for="facultyUsername">Faculty username</label><input id="facultyUsername" name="username" autocomplete="username" required style="display:block;width:100%;margin:7px 0 14px;padding:11px;border:1px solid #d6deea;border-radius:7px"><label for="facultyPassword">Password</label><input id="facultyPassword" name="password" type="password" autocomplete="current-password" required style="display:block;width:100%;margin:7px 0 16px;padding:11px;border:1px solid #d6deea;border-radius:7px"><button class="btn primary" type="submit" style="width:100%;padding:12px">Sign in</button><div data-auth-status role="status" style="margin-top:12px;color:#718097;font-size:12px"></div></form>';
+    panel.innerHTML = '<form style="width:min(100%,390px);background:white;border:1px solid #e5eaf1;border-radius:14px;padding:28px;box-shadow:0 12px 36px #22314b18"><div style="font-size:22px;font-weight:700;margin-bottom:6px">EvalAI faculty sign-in</div><p style="color:#718097;font-size:13px">Faculty workspace</p><label for="facultyUsername">Faculty username</label><input id="facultyUsername" name="username" autocomplete="username" required style="display:block;width:100%;margin:7px 0 14px;padding:11px;border:1px solid #d6deea;border-radius:7px"><label for="facultyPassword">Password</label><input id="facultyPassword" name="password" type="password" autocomplete="current-password" required style="display:block;width:100%;margin:7px 0 16px;padding:11px;border:1px solid #d6deea;border-radius:7px"><button class="btn primary" type="submit" style="width:100%;padding:12px">Sign in</button><div data-auth-status role="status" style="margin-top:12px;color:#718097;font-size:12px"></div></form>';
     document.body.appendChild(panel);
     panel.querySelector("form").addEventListener("submit", async function (event) {
       event.preventDefault();
@@ -95,7 +95,7 @@
         addSignOut();
         return true;
       }
-      showPanel("Sign in with the faculty account configured for this demo.");
+      showPanel("Sign in with the faculty account configured for this workspace.");
     } catch (error) { showPanel(error.message); }
     return false;
   };

@@ -54,12 +54,12 @@ def generate_feedback(evaluation) -> dict:
     }
 
 
-def render_feedback_pdf(student_name: str, roll_number: str, content: dict, fictional: bool = True) -> bytes:
+def render_feedback_pdf(student_name: str, roll_number: str, content: dict) -> bytes:
     document = pymupdf.open()
     page = document.new_page()
     lines = [
-        "ABC College | Faculty Feedback Report",
-        "FICTIONAL DEMO STUDENT RECORD" if fictional else "Confidential student feedback",
+        "EvalAI | Faculty Feedback Report",
+        "Confidential student feedback",
         f"Student: {student_name} ({roll_number})",
         f"Assessment: {content['assessment_code']}",
         f"Approved score: {content['score']} / {content['maximum_marks']} ({content['percentage']}%)",

@@ -1,4 +1,4 @@
-"""Database models for fictional students and assessments."""
+"""Database models for student records and assessments."""
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, UniqueConstraint
@@ -19,6 +19,8 @@ class Student(Base):
     program: Mapped[str] = mapped_column(String(100))
     academic_year: Mapped[str] = mapped_column(String(20))
     year: Mapped[str] = mapped_column(String(20))
+    branch: Mapped[str] = mapped_column(String(100), default="Information Technology")
+    semester: Mapped[str] = mapped_column(String(20), default="Semester III")
     admission_year: Mapped[str] = mapped_column(String(4))
     assessments: Mapped[list["Assessment"]] = relationship(back_populates="student", cascade="all, delete-orphan")
 
@@ -66,11 +68,18 @@ class AssessmentWorkspace(Base):
     test_code: Mapped[str] = mapped_column(String(20), index=True)
     test_date: Mapped[str] = mapped_column(String(30), default="")
     rules: Mapped[str] = mapped_column(String(2000), default="")
+    marking_mode: Mapped[str] = mapped_column(String(30), default="holistic_percentage")
+    correctness_threshold: Mapped[float] = mapped_column(Float, default=0.5)
+    score_bands: Mapped[list] = mapped_column(JSON, default=list)
     rubric_criteria: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     documents: Mapped[list["UploadedDocument"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
     questions: Mapped[list["AssessmentQuestion"]] = relationship(back_populates="workspace", cascade="all, delete-orphan", order_by="AssessmentQuestion.position")
     evaluations: Mapped[list["AssessmentEvaluation"]] = relationship(back_populates="workspace", cascade="all, delete-orphan")
+
+    @property
+    def total_marks(self) -> int:
+        return sum(question.maximum_marks for question in self.questions)
 
 
 class AssessmentQuestion(Base):
@@ -172,6 +181,8 @@ class UploadedDocument(Base):
     student: Mapped[Student | None] = relationship()
     pages: Mapped[list["ExtractedPage"]] = relationship(back_populates="document", cascade="all, delete-orphan", order_by="ExtractedPage.page_number")
 
+    job: Mapped["ProcessingJob | None"] = relationship(cascade="all, delete-orphan")
+
     @property
     def student_roll_number(self) -> str | None:
         return self.student.roll_number if self.student else None
@@ -195,3 +206,19 @@ class ExtractedPage(Base):
     faculty_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     document: Mapped[UploadedDocument] = relationship(back_populates="pages")
+
+class ProcessingJob(Base):
+    """A durable extraction and provisional evaluation job for one upload."""
+    __tablename__ = "processing_jobs"
+
+    document_id: Mapped[int] = mapped_column(ForeignKey("uploaded_documents.id"), primary_key=True)
+    state: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    stage: Mapped[str] = mapped_column(String(24), default="extraction")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    pages_done: Mapped[int] = mapped_column(Integer, default=0)
+    detail: Mapped[str] = mapped_column(String(500), default="Waiting for the local processing worker.")
+    detected_roll: Mapped[str | None] = mapped_column(String(20))
+    match_method: Mapped[str | None] = mapped_column(String(24))
+    match_detail: Mapped[str | None] = mapped_column(String(240))
+    allow_external: Mapped[bool] = mapped_column(Boolean, default=False)

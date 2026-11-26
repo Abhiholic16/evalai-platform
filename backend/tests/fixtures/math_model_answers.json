@@ -1,0 +1,250 @@
+{
+  "source_assignment": {
+    "course": "Mathematics for Computer Engineers",
+    "course_code": "R5MA290079T",
+    "program": "S.Y. B.Tech",
+    "branch": "Information Technology",
+    "semester": "III",
+    "question_count": 16
+  },
+  "marking_note": "Printed assignment does not state marks per question. A provisional 5 marks per question (80 total) is stored only to satisfy the prototype schema; faculty must verify or replace this allocation before using any evaluation workflow.",
+  "questions": [
+    {
+      "question_id": "Q01",
+      "position": 1,
+      "prompt": "Express -8 + 4/i + 25/(3 - 4i) in the form r(cos θ + i sin θ), -π < θ ≤ π.",
+      "model_answer": "Rationalize and simplify: 4/i = -4i, while 25/(3-4i) = 25(3+4i)/25 = 3+4i. Thus z = -8 - 4i + 3 + 4i = -5. Its modulus is 5 and its principal argument in the requested interval is π. Therefore r = 5, θ = π, and z = 5(cos π + i sin π).",
+      "rubric_criteria": [
+        "Correctly simplify 4/i and 25/(3-4i)",
+        "Identify modulus 5",
+        "Use principal argument θ = π within the stated interval"
+      ]
+    },
+    {
+      "question_id": "Q02",
+      "position": 2,
+      "prompt": "Show that ((1-i)^49 (cos(π/40)+i sin(π/40))^10)/(8i-8√3)^6 = -√2.",
+      "model_answer": "Write each factor in polar form. 1-i = √2 cis(-π/4), so (1-i)^49 = 2^(49/2) cis(-49π/4). The trigonometric factor to the tenth power is cis(π/4). Their product is 2^(49/2) cis(-12π) = 2^(49/2). Also 8i-8√3 = 16 cis(5π/6), hence its sixth power is 16^6 cis(5π) = -2^24. The quotient is -2^(49/2-24) = -2^(1/2) = -√2.",
+      "rubric_criteria": [
+        "Convert 1-i and 8i-8√3 correctly to polar form",
+        "Apply De Moivre theorem to both powers",
+        "Combine arguments and magnitudes to obtain -√2"
+      ]
+    },
+    {
+      "question_id": "Q03",
+      "position": 3,
+      "prompt": "Solve z^4 = -8 - 8√3 i.",
+      "model_answer": "The right-hand side has modulus √(64+192)=16 and argument -2π/3 (equivalently 4π/3). Its fourth roots have modulus 16^(1/4)=2 and arguments (-2π/3+2kπ)/4 = -π/6+kπ/2, k=0,1,2,3. Thus z=2 cis(-π/6), 2 cis(π/3), 2 cis(5π/6), and 2 cis(4π/3).",
+      "rubric_criteria": [
+        "Find modulus 16 and a valid argument",
+        "Use all four root arguments",
+        "Give four distinct roots with modulus 2"
+      ]
+    },
+    {
+      "question_id": "Q04",
+      "position": 4,
+      "prompt": "Find all values of z which satisfy e^z = 1 + i.",
+      "model_answer": "Write z=x+iy. Since |1+i|=√2 and arg(1+i)=π/4+2kπ, equality of modulus and argument gives e^x=√2 and y=π/4+2kπ. Therefore z=ln(√2)+i(π/4+2kπ), k any integer.",
+      "rubric_criteria": [
+        "Use the modulus equation e^x=√2",
+        "Account for all arguments π/4+2kπ",
+        "State the complete family of complex logarithms"
+      ]
+    },
+    {
+      "question_id": "Q05",
+      "position": 5,
+      "prompt": "Discuss the analyticity of f(z) = log(z-i).",
+      "model_answer": "The complex logarithm is multivalued, so it does not define one global single-valued analytic function on C\\{i}. On any simply connected domain avoiding i where a continuous argument is chosen, a branch is analytic and f'(z)=1/(z-i). For the principal logarithm with its usual cut along the nonpositive real axis of its argument, the z-plane cut is {z=x+i : x≤0}; the principal branch is analytic on C minus that ray. The branch convention should be specified by the course.",
+      "rubric_criteria": [
+        "Recognize the logarithm is multivalued and has a branch point at z=i",
+        "Describe local/branch-domain analyticity",
+        "Give derivative 1/(z-i) and principal branch cut if that convention is used"
+      ]
+    },
+    {
+      "question_id": "Q06",
+      "position": 6,
+      "prompt": "For f(z)=(x^3+3xy^2-3x)+i(y^3+3x^2y-3y), determine the points where it is (i) differentiable and (ii) analytic.",
+      "model_answer": "Let u=x^3+3xy^2-3x and v=y^3+3x^2y-3y. Then u_x=3x^2+3y^2-3, u_y=6xy, v_x=6xy, and v_y=3x^2+3y^2-3. The first Cauchy-Riemann equation holds everywhere; the second requires 6xy=-6xy, or xy=0. Since the first partial derivatives are continuous, f is complex differentiable exactly on the real and imaginary axes (including the origin). This set has no open subset, so f is analytic nowhere (analytic means differentiable on an open neighborhood). At points on the axes, f'(z)=3(x^2+y^2)-3+i6xy.",
+      "rubric_criteria": [
+        "Compute the four first partial derivatives correctly",
+        "Apply both Cauchy-Riemann equations and obtain xy=0",
+        "Distinguish differentiability on the axes from analyticity on an open set"
+      ]
+    },
+    {
+      "question_id": "Q07",
+      "position": 7,
+      "prompt": "Find a, b and c so that w=x-2ay+i(bx-cy) is analytic.",
+      "model_answer": "Let u=x-2ay and v=bx-cy. The Cauchy-Riemann equations are u_x=v_y and u_y=-v_x. They give 1=-c, so c=-1, and -2a=-b, so b=2a. Thus a is arbitrary, b=2a, c=-1. These conditions make the affine function analytic on the whole plane.",
+      "rubric_criteria": [
+        "Set up both Cauchy-Riemann equations",
+        "Obtain c=-1 and b=2a",
+        "State that a is arbitrary and analyticity is global"
+      ]
+    },
+    {
+      "question_id": "Q08",
+      "position": 8,
+      "prompt": "Find f\\′(z) when f(z)=(r^2 cos 2θ+r cos θ)+i(r^2 sin 2θ+r sin θ).",
+      "model_answer": "Using z=r(cos θ+i sin θ), the given expression is z^2+z. Therefore f\\′(z)=2z+1.",
+      "rubric_criteria": [
+        "Recognize r^2 cis(2θ)=z^2 and r cis θ=z",
+        "Differentiate the resulting polynomial"
+      ]
+    },
+    {
+      "question_id": "Q09",
+      "position": 9,
+      "prompt": "For z≠0 let f(z)=[x^3(1+i)-y^3(1-i)]/|z|^2, and let f(0)=0. Show the Cauchy-Riemann equations hold at the origin. Does f\\′(0) exist?",
+      "model_answer": "For z≠0, write f=u+iv with u=(x^3-y^3)/(x^2+y^2) and v=(x^3+y^3)/(x^2+y^2); set u(0,0)=v(0,0)=0. Axis limits give u_x(0)=1, u_y(0)=-1, v_x(0)=1, v_y(0)=1, so u_x=v_y and u_y=-v_x at the origin. But the difference quotient is path-dependent: along y=0, f(z)/z=1+i; along y=x, f(z)/z=(1+i)/2. Hence f\\′(0) does not exist despite the Cauchy-Riemann equations holding there.",
+      "rubric_criteria": [
+        "Separate real and imaginary parts and compute partial derivatives at zero",
+        "Verify both Cauchy-Riemann equalities",
+        "Use two paths to show the difference quotient has different limits"
+      ]
+    },
+    {
+      "question_id": "Q10",
+      "position": 10,
+      "prompt": "If u is a harmonic function, show that w=u^2 is not harmonic unless u is a constant.",
+      "model_answer": "On a domain where u is real-valued and twice continuously differentiable, Δ(u^2)=∂xx(u^2)+∂yy(u^2)=2uΔu+2(u_x^2+u_y^2). Since u is harmonic, Δu=0, so Δ(u^2)=2|∇u|^2. Thus u^2 is harmonic only if ∇u=0 everywhere. On a connected domain this means u is constant. If the domain is disconnected, u may be a different constant on each component.",
+      "rubric_criteria": [
+        "Apply the product/chain rule to compute Δ(u^2)",
+        "Use Δu=0 to reduce to 2|∇u|^2",
+        "Explain the connected-domain condition for constancy"
+      ]
+    },
+    {
+      "question_id": "Q11",
+      "position": 11,
+      "prompt": "If f(z) is analytic, show that log |f(z)| is a harmonic function.",
+      "model_answer": "The statement holds on any domain where f is analytic and nonzero. Around each point there, choose a local analytic branch of log f. Then log|f|=Re(log f), the real part of an analytic function, and is harmonic. Equivalently, locally Δ log|f|=0. At zeros of a nonconstant analytic function, log|f| is undefined and generally has a logarithmic singularity; the claim is not valid there as an ordinary harmonic function.",
+      "rubric_criteria": [
+        "State the required nonzero domain",
+        "Use log|f|=Re(log f) locally",
+        "Explain why zeros are excluded"
+      ]
+    },
+    {
+      "question_id": "Q12",
+      "position": 12,
+      "prompt": "Find the image of the first quadrant under w=(z-i)/(z+i).",
+      "model_answer": "For z=x+iy with x>0 and y>0, Im(w)=-2x/(x^2+(y+1)^2)<0 and |w|^2=[x^2+(y-1)^2]/[x^2+(y+1)^2]<1. Therefore the open first quadrant maps to the open lower half of the unit disk: |w|<1 and Im(w)<0. Its boundary rays map to the lower unit semicircle and the real interval (-1,1), respectively.",
+      "rubric_criteria": [
+        "Establish |w|<1 for y>0",
+        "Establish Im(w)<0 for x>0",
+        "Identify the image as the lower half of the unit disk"
+      ]
+    },
+    {
+      "question_id": "Q13",
+      "position": 13,
+      "prompt": "Find a bilinear transformation mapping 1, i, -i onto ∞, 0, 1 respectively.",
+      "model_answer": "A map with a pole at z=1 and a zero at z=i has form w=K(z-i)/(z-1). Requiring w(-i)=1 gives K=(-1-i)/(-2i)=(1-i)/2. Hence w=(1-i)(z-i)/[2(z-1)]. Substitution confirms the three required images.",
+      "rubric_criteria": [
+        "Choose a transformation with pole at 1 and zero at i",
+        "Solve the constant from the image of -i",
+        "Verify all three point mappings"
+      ]
+    },
+    {
+      "question_id": "Q14",
+      "position": 14,
+      "prompt": "Find a bilinear transformation mapping 0, 1+i, 2i onto 1, i, ∞ respectively.",
+      "model_answer": "The pole at z=2i gives denominator z-2i. Enforce w(0)=1 by writing w=1+Kz/(z-2i). The condition w(1+i)=i gives K=1+i. Therefore w=1+(1+i)z/(z-2i)=[(2+i)z-2i]/(z-2i). Substitution verifies w(0)=1, w(1+i)=i and w(2i)=∞.",
+      "rubric_criteria": [
+        "Place the pole at z=2i",
+        "Use w(0)=1 to reduce the degrees of freedom",
+        "Solve K=1+i and verify the second finite image"
+      ]
+    },
+    {
+      "question_id": "Q15",
+      "position": 15,
+      "prompt": "Given w=i(2z+3i)/(z+2i), find (a) the image of the region within the circle centered at z=-2i with radius 3, and (b) the image of Re(z)≥0 and Im(z)≥-2.",
+      "model_answer": "Simplify w=i(2z+3i)/(z+2i)=2i+1/(z+2i). (a) Let ζ=z+2i. The disk centered at -2i with radius 3 is |ζ|≤3; under inversion, |w-2i|=1/|ζ|≥1/3. Thus its finite image is the exterior of the circle centered at 2i with radius 1/3 (including the boundary if the original disk is closed); ζ=0 maps to infinity on the extended plane. For an open disk, use the strict inequality and likewise include infinity in the extended plane. (b) The stated half-planes become Re(ζ)≥0 and Im(ζ)≥0, the first quadrant. Inversion maps its interior to Re(w)>0 and Im(w)<2. Including boundaries gives Re(w)≥0 and Im(w)≤2, with the pole mapped to infinity.",
+      "rubric_criteria": [
+        "Rewrite the mapping as 2i+1/(z+2i)",
+        "Map the radius-3 disk to the exterior radius-1/3 circle and handle the pole",
+        "Map the shifted first quadrant to Re(w)≥0, Im(w)≤2, noting boundary convention"
+      ]
+    },
+    {
+      "question_id": "Q16",
+      "position": 16,
+      "prompt": "Find the image of R: 0<a≤x≤b, 0<c≤y≤d<2π under w=e^(-z). Is the mapping conformal?",
+      "model_answer": "For z=x+iy, w=e^(-x)e^(-iy). Thus |w|=e^(-x), so e^(-b)≤|w|≤e^(-a). Its argument is -y modulo 2π; with 0<c≤y≤d<2π this gives 2π-d≤arg(w)≤2π-c (modulo 2π). The image is the corresponding closed annular sector. The derivative is w\\′=-e^(-z), which is never zero, so the map is locally conformal throughout. Because the stated y-interval has width at most d-c<2π, no two distinct points in this rectangle differ by the period 2πi; hence the map is also one-to-one there. The printed line contains a stray trailing “9” after 2π; it appears typographical and is not included in the domain.",
+      "rubric_criteria": [
+        "Transform x bounds into radii e^(-b) and e^(-a)",
+        "Transform y bounds into the argument interval modulo 2π",
+        "Use the nonzero derivative to establish conformality and note the printed stray 9"
+      ]
+    }
+  ],
+  "mock_students": [
+    {
+      "roll": "251081011",
+      "name": "Aarav Sharma",
+      "section": "A",
+      "email": "aarav.sharma@example.test",
+      "fixture": "251081011_answer_sheet.pdf",
+      "answers": [
+        "Q1: 4/i=-4i and 25/(3-4i)=3+4i, so the expression is -5.",
+        "Q2: (1-i) has modulus √2 and argument -π/4; I still need to check the powers."
+      ],
+      "program": "Engineering",
+      "year": "Year 2",
+      "branch": "Information Technology",
+      "semester": "Semester III"
+    },
+    {
+      "roll": "251081068",
+      "name": "Ananya Patel",
+      "section": "A",
+      "email": "ananya.patel@example.test",
+      "fixture": "251081068_answer_sheet.pdf",
+      "answers": [
+        "Q3: The right-hand side has modulus 16 and argument -2π/3, so the four roots have modulus 2.",
+        "Q4: e^x=√2 and y=π/4+2kπ; therefore z=ln√2+i(π/4+2kπ)."
+      ],
+      "program": "Engineering",
+      "year": "Year 2",
+      "branch": "Information Technology",
+      "semester": "Semester III"
+    },
+    {
+      "roll": "251081046",
+      "name": "Rohan Verma",
+      "section": "A",
+      "email": "rohan.verma@example.test",
+      "fixture": "251081046_answer_sheet.pdf",
+      "answers": [
+        "Q5: A branch of log(z-i) has derivative 1/(z-i) on a suitable cut domain.",
+        "Q6: The Cauchy-Riemann conditions reduce to xy=0, which is the pair of coordinate axes."
+      ],
+      "program": "Engineering",
+      "year": "Year 2",
+      "branch": "Information Technology",
+      "semester": "Semester III"
+    },
+    {
+      "roll": "251081001",
+      "name": "Priya Nair",
+      "section": "A",
+      "email": "priya.nair@example.test",
+      "fixture": "251081001_answer_sheet.pdf",
+      "answers": [
+        "Q7: The equations give c=-1 and b=2a.",
+        "Q8: The expression is z^2+z, so f prime is 2z+1."
+      ],
+      "program": "Engineering",
+      "year": "Year 2",
+      "branch": "Information Technology",
+      "semester": "Semester III"
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 # EvalAI - Project Instructions
 
 ## Project Overview
-EvalAI is an Intelligent Assessment and Personalized Learning Feedback Platform for a fictional client, ABC College.
+EvalAI is an Intelligent Assessment and Personalized Learning Feedback Platform for an engineering college.
 
 The system helps faculty evaluate handwritten student examination papers using OCR and AI-assisted rubric-based evaluation.
 
@@ -17,7 +17,7 @@ The system helps faculty evaluate handwritten student examination papers using O
 8. Approved feedback is delivered through email.
 9. Faculty can view student performance history and trends.
 
-Students do not log in. Student records come from the college database through a backend API.
+Students do not log in. This local prototype uses fictional records stored in SQLite; no college database is connected.
 
 ## Technology Stack
 - Frontend: Existing HTML, CSS, and JavaScript prototype.
@@ -25,7 +25,7 @@ Students do not log in. Student records come from the college database through a
 - Database: SQLite initially.
 - ORM: SQLAlchemy.
 - Validation: Pydantic.
-- AI: OpenAI API.
+- AI: Google Gemini API using the official Google Gen AI Python SDK.
 - Document processing: PyMuPDF and appropriate OCR/vision tools.
 - Testing: Pytest.
 - Version control: Git and GitHub.
@@ -37,7 +37,7 @@ Students do not log in. Student records come from the college database through a
 - Build in small, independently testable phases.
 - Never implement the entire project in one step.
 - Do not invent integrations or claim simulated features are real.
-- Use fictional sample student records during development.
+- Preserve the current four-student mock roster and seeded assessment data; isolate test records in temporary databases.
 - Never expose API keys or secrets in source code.
 - Use environment variables for configuration.
 - Validate uploaded files and API inputs.
